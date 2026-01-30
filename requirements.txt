@@ -3,3 +3,5 @@ aiosqlite
 python-dotenv
 flask
 PyNaCl
+matplotlib
+pandas
