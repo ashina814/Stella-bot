@@ -570,7 +570,6 @@ class Economy(commands.Cog):
 
             await interaction.followup.send(f"✅ 送金成功: {receiver.mention} へ {amount:,} L 送りました。{dm_status}", ephemeral=True)
             
-            await interaction.channel.send(f"💸 **Money Move**: {sender.mention} が {receiver.mention} に送金しました！")
 
         except Exception as e:
             logger.error(f"Transfer Error: {e}")
