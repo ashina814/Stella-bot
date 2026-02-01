@@ -387,7 +387,7 @@ class PrivateVCManager(commands.Cog):
     async def before_check(self):
         await self.bot.wait_until_ready()
 
-    @app_commands.command(name="一時VCパネル作成", description="【管理者】内容をカスタマイズしてVC作成パネルを設置します")
+    @app_commands.command(name="一時vcパネル作成", description="【管理者】内容をカスタマイズしてVC作成パネルを設置します")
     @app_commands.describe(
         title="パネルのタイトル",
         description="パネルの説明文（\\nで改行）",
