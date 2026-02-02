@@ -18,6 +18,8 @@ import os
 from typing import Optional, List, Dict
 from dotenv import load_dotenv
 from logging.handlers import RotatingFileHandler
+GEKIATSU = "<:b_069:1438962326463054008>"
+
 
 # --- 環境変数とロギング ---
 # load_dotenv() の中身を空にすることで、標準の「.env」を探し、
@@ -1383,9 +1385,6 @@ class InterviewSystem(commands.Cog):
 
                 await channel.send(embed=log_embed)
 
-# 激アツ絵文字 (サーバーに登録されている必要があります)
-GEKIATSU = "<:b_069:1438962326463054008>"
-
 # --- 1. PVP申し込み待ちView ---
 class ChinchiroPVPApplyView(discord.ui.View):
     def __init__(self, cog, challenger, opponent, bet):
@@ -1700,8 +1699,6 @@ class Chinchiro(commands.Cog):
         embed.add_field(name=p2.display_name, value=r2['name'], inline=True)
         await msg.edit(embed=embed, view=None)
 
-# 激アツ絵文字
-GEKIATSU = "<:b_069:1438962326463054008>"
 
 class Slot(commands.Cog):
     def __init__(self, bot):
