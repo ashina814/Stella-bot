@@ -1265,96 +1265,184 @@ class Chinchiro(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.dice_emojis = ["", "⚀", "⚁", "⚂", "⚃", "⚄", "⚅"]
+        
+        # --- 沼要素の状態管理 ---
+        self.win_streaks = {}       # 連勝記録
+        self.user_bad_luck = {}     # 連続敗北記録（嫉妬補正用）
+        self.cheap_play_count = {}  # ケチプレイ記録
+        
+        self.burn_gauge = 0         # サーバー全体の焼却総額（フィーバーゲージ）
+        self.fever_threshold = 1000000  # フィーバー突入のしきい値 (例: 100万Ru)
+        self.fever_until = None     # フィーバー終了時刻
+    
+    def is_fever(self):
+        """現在フィーバータイム中かどうかを確認"""
+        if self.fever_until and datetime.datetime.now() < self.fever_until:
+            return True
+        self.fever_until = None # 期限切れならリセット
+        return False
 
     def roll_dice(self):
+        """基本のサイコロ振りロジック"""
         dice = [random.randint(1, 6) for _ in range(3)]
         dice.sort()
-        if dice[0] == dice[1] == dice[2]: return dice, 100 + dice[0], f"嵐 ({dice[0]})"
-        if dice == [4, 5, 6]: return dice, 90, "シゴロ"
-        if dice == [1, 2, 3]: return dice, -1, "ヒフミ"
-        if dice[0] == dice[1]: return dice, dice[2], f"{dice[2]}の目"
-        if dice[1] == dice[2]: return dice, dice[0], f"{dice[0]}の目"
-        if dice[0] == dice[2]: return dice, dice[1], f"{dice[1]}の目"
-        return dice, 0, "目なし"
+        if dice[0] == dice[1] == dice[2]:
+            mult = 5 if dice[0] == 1 else 3
+            return dice, 100 + dice[0], f"嵐 ({dice[0]})", mult
+        if dice == [4, 5, 6]: return dice, 90, "シゴロ", 2
+        if dice == [1, 2, 3]: return dice, -1, "ヒフミ", -2
+        if dice[0] == dice[1]: return dice, dice[2], f"{dice[2]}の目", 1
+        if dice[1] == dice[2]: return dice, dice[0], f"{dice[0]}の目", 1
+        if dice[0] == dice[2]: return dice, dice[1], f"{dice[1]}の目", 1
+        return dice, 0, "目なし", 0
 
-    @app_commands.command(name="チンチロ", description="Ruを賭けて勝負！(※女神の加護で親が絶対有利だよ♡)")
+    @app_commands.command(name="チンチロ", description="ルメンちゃんと勝負！焼却ゲージが溜まると確変突入！？")
     async def chinchiro(self, interaction: discord.Interaction, bet: int):
-        if bet < 100: return await interaction.response.send_message("最低100Ruからだよ、ケチらないでよね？", ephemeral=True)
-        
+        if bet < 100: return await interaction.response.send_message("100Ru以下の小銭で私を動かそうなんて、100年早いよぉ♡", ephemeral=True)
         await interaction.response.defer()
         user = interaction.user
+
+        # 1. ケチプレイチェック
+        is_cheap = False
+        if bet == 100:
+            self.cheap_play_count[user.id] = self.cheap_play_count.get(user.id, 0) + 1
+            if self.cheap_play_count[user.id] >= 5: is_cheap = True
+        else: self.cheap_play_count[user.id] = 0
+
+        # 2. フィーバー状態の確認
+        fever = self.is_fever()
+
+        # 3. ルメンちゃんの機嫌設定
+        mood_roll = random.randint(1, 100)
+        if fever: # フィーバー中は強制的に上機嫌以上
+            mood, m_color = "✨超・上機嫌✨", 0xff00ff
+            mood_texts = ["今の私は無敵なんだから！どんどん賭けなさいよ！", "フィーバータイムだよ！Ruの雨を降らせてあげる♡"]
+        elif mood_roll <= 20: 
+            mood, m_color = "不機嫌", 0xff4500
+            mood_texts = ["チッ…さっさと負けてよね。", "あんたみたいな凡人に構ってる暇はないんだけど？"]
+        elif mood_roll >= 85: 
+            mood, m_color = "上機嫌", 0xffd700
+            mood_texts = ["ちょっとだけ手加減してあげる♡", "ふふっ、特別に私の「デレ」が見たいの？"]
+        else: 
+            mood, m_color = "通常", 0x2f3136
+            mood_texts = ["適当に相手してあげるわ。", "しっかりRuを絞り取ってあげる♡"]
 
         async with self.bot.get_db() as db:
             async with db.execute("SELECT balance FROM accounts WHERE user_id = ?", (user.id,)) as c:
                 row = await c.fetchone()
                 if not row or row['balance'] < bet:
-                    return await interaction.followup.send("お財布空っぽじゃん、ざぁこ♡ 稼いできてから出直してよ。")
+                    return await interaction.followup.send("お財布空っぽじゃん！ざぁーこ♡")
 
-        embed = discord.Embed(title="🎲 チンチロリン・Elysion", color=0x2f3136)
-        embed.set_author(name=f"{user.display_name}の挑戦♡", icon_url=user.display_avatar.url)
-        embed.add_field(name="賭け金", value=f"{bet:,} Ru", inline=False)
+        # フィーバーゲージの表示作成
+        gauge_val = min(10, int((self.burn_gauge / self.fever_threshold) * 10))
+        gauge_bar = "🔥" * gauge_val + "⬛" * (10 - gauge_val)
+        
+        embed = discord.Embed(title="🎲 ルーメン銀行・出張カジノ", color=m_color)
+        embed.set_author(name=f"ルメンちゃんの機嫌: {mood}", icon_url=user.display_avatar.url)
+        embed.description = f"「{random.choice(mood_texts)}」\n\n**焼却（フィーバー）ゲージ**\n{gauge_bar} ({self.burn_gauge:,} / {self.fever_threshold:,})"
+        if is_cheap: embed.description += "\n⚠️ **ケチな遊び方にルメンちゃんがイライラしています！**"
+        embed.add_field(name="あなたの賭け金", value=f"{bet:,} Ru", inline=False)
         msg = await interaction.followup.send(embed=embed)
 
-        # --- 親の番 ---
-        embed.add_field(name="親(Bot)の出目", value="くるくる...", inline=True)
-        await asyncio.sleep(1.5)
-        p_dice, p_score, p_name = self.roll_dice()
+        # --- 親（ルメンちゃん）の番 ---
+        embed.add_field(name="ルメンちゃんの出目", value="くるくる...", inline=True)
+        await msg.edit(embed=embed)
+        await asyncio.sleep(1.2)
+        p_dice, p_score, p_name, p_mult = self.roll_dice()
+        
+        # フィーバー中は親が弱くなる補正（親が強役を出しにくい）
+        if fever and p_score >= 90 and random.random() < 0.5:
+             p_dice, p_score, p_name, p_mult = [1, 2, 4], 0, "目なし(接待)", 0
+
         p_str = " ".join([self.dice_emojis[d] for d in p_dice])
-        embed.set_field_at(1, name="親(Bot)の出目", value=f"**{p_name}**\n`{p_str}`", inline=True)
+        embed.set_field_at(1, name="ルメンちゃんの出目", value=f"**{p_name}**\n`{p_str}`", inline=True)
         await msg.edit(embed=embed)
 
-        if p_score >= 90:
-            return await self.process_result(interaction, msg, embed, user, bet, "lose", "親の強役だもん！文句ある？全部没収ね♡")
+        if p_score >= 1:
+            return await self.process_result(msg, embed, user, bet, -p_mult, mood, is_cheap, fever, f"私の{p_name}！没収ね♡")
 
-        # --- 子の番 ---
+        # --- 子（ユーザー）の番 ---
         embed.add_field(name="あなたの出目", value="くるくる...", inline=True)
-        await asyncio.sleep(1.5)
-        u_dice, u_score, u_name = self.roll_dice()
+        await msg.edit(embed=embed)
+        await asyncio.sleep(1.2)
+        u_dice, u_score, u_name, u_mult = self.roll_dice()
+
+        # 【沼要素：嫉妬（負け越し）補正】
+        # 3連敗以上で「目なし」なら、30%の確率で「1の目」に救済
+        if self.user_bad_luck.get(user.id, 0) >= 3 and u_score == 0:
+            if random.random() < 0.3:
+                u_dice, u_score, u_name, u_mult = [1, 2, 1], 2, "2の目 (慈悲)", 1
+                u_dice.sort()
+
         u_str = " ".join([self.dice_emojis[d] for d in u_dice])
         embed.set_field_at(2, name="あなたの出目", value=f"**{u_name}**\n`{u_str}`", inline=True)
         await msg.edit(embed=embed)
 
-        # --- 判定ロジック ---
+        # 判定
         if u_score == -1: # ヒフミ
-            await self.process_result(interaction, msg, embed, user, bet, "lose_double", "えっ、ヒフミ！？うわぁ…ダッサ♡ おバカさんには「2倍」払ってもらうね！")
+            await self.process_result(msg, embed, user, bet, -2, mood, is_cheap, fever, "ヒフミ！おバカさんにはお似合い。2倍払って！♡")
         elif u_score > p_score:
-            res_type = "win_triple" if u_score > 100 else "win_double" if u_score == 90 else "win"
-            await self.process_result(interaction, msg, embed, user, bet, res_type, "チッ…運だけはいいんだね。ほら、女神への奉納金を引いた残額だよ。ありがたく受け取りなよ。")
+            await self.process_result(msg, embed, user, bet, u_mult, mood, is_cheap, fever, "な、何よ…運がいいだけじゃない。")
         elif u_score == p_score:
-            await self.process_result(interaction, msg, embed, user, bet, "lose", "同点は親の勝ちだよ！ルールも知らないの？Ruは美味しく焼却してあげるね♡")
+            # フィーバー中、または上機嫌以上なら引き分け
+            res_mult = 0 if (fever or "上機嫌" in mood) else -1
+            res_comment = "今回は引き分け。感謝しなよ？" if res_mult == 0 else "同点は私の勝ち！没収だよぉ♡"
+            await self.process_result(msg, embed, user, bet, res_mult, mood, is_cheap, fever, res_comment)
         else:
-            await self.process_result(interaction, msg, embed, user, bet, "lose", "はい負けー♡ そのRuはElysionのゴミ箱行きでーす！お疲れ様♡")
+            await self.process_result(msg, embed, user, bet, -1, mood, is_cheap, fever, "はい私の勝ちー♡ Ruは美味しく焼却ね♡")
 
-    async def process_result(self, interaction, msg, embed, user, bet, result, comment):
-        multiplier = 0
-        if "win_triple" in result: multiplier = 3
-        elif "win_double" in result: multiplier = 2
-        elif "win" in result: multiplier = 1
-        elif "lose_double" in result: multiplier = -2
-        else: multiplier = -1
+    async def process_result(self, msg, embed, user, bet, multiplier, mood, is_cheap, fever, comment):
+        # 税率設定 (フィーバー中は0%！)
+        tax_rate = 0.00 if fever else (0.50 if is_cheap else (0.20 if "不機嫌" in mood else (0.05 if "上機嫌" in mood else 0.10)))
+        bonus_ru = 0
+        
+        if multiplier > 0:
+            self.win_streaks[user.id] = self.win_streaks.get(user.id, 0) + 1
+            self.user_bad_luck[user.id] = 0 # 負け越しリセット
+            if self.win_streaks[user.id] >= 3:
+                bonus_ru = int(bet * 0.5)
+                comment += "\n\n✨ **3連勝ボーナス！** ✨\n「…あーもう！ほら、これあげるわよ！///」"
+                self.win_streaks[user.id] = 0
+        elif multiplier < 0:
+            self.win_streaks[user.id] = 0
+            self.user_bad_luck[user.id] = self.user_bad_luck.get(user.id, 0) + 1
+        else: # 引き分け
+            self.win_streaks[user.id] = 0
 
         async with self.bot.get_db() as db:
             if multiplier > 0:
                 raw_payout = bet * multiplier
-                tax = int(raw_payout * 0.1) # 10%焼却
-                final_payout = raw_payout - tax
+                tax = int(raw_payout * tax_rate)
+                final_payout = raw_payout - tax + bonus_ru
                 await db.execute("UPDATE accounts SET balance = balance + ? WHERE user_id = ?", (final_payout, user.id))
                 embed.color = 0x00ff00
-                res_msg = f"**結果: +{final_payout:,} Ru** (奉納金: {tax} Ru)"
+                res_msg = f"**結果: +{final_payout:,} Ru**"
+                if tax > 0: res_msg += f" (奉納金: {tax} Ru)"
+            elif multiplier == 0:
+                embed.color = 0x808080
+                res_msg = f"**結果: ±0 Ru** (返金)"
             else:
-                loss_amount = bet * abs(multiplier)
-                await db.execute("UPDATE accounts SET balance = balance - ? WHERE user_id = ?", (loss_amount, user.id))
-                await db.execute("UPDATE accounts SET balance = balance + ? WHERE user_id = 0", (loss_amount,))
-                embed.color = 0xff0000
-                res_msg = f"**結果: -{loss_amount:,} Ru**"
+                loss = bet * abs(multiplier)
+                async with db.execute("SELECT balance FROM accounts WHERE user_id = ?", (user.id,)) as c:
+                    bal = (await c.fetchone())['balance']
+                    actual_loss = min(loss, bal)
+                await db.execute("UPDATE accounts SET balance = balance - ? WHERE user_id = ?", (actual_loss, user.id))
+                await db.execute("UPDATE accounts SET balance = balance + ? WHERE user_id = 0", (actual_loss,))
+                
+                # 焼却分をゲージに加算
+                if not fever:
+                    self.burn_gauge += actual_loss
+                    if self.burn_gauge >= self.fever_threshold:
+                        self.fever_until = datetime.datetime.now() + datetime.timedelta(minutes=30)
+                        self.burn_gauge = 0
+                        comment += "\n\n🔥 **FEVER TIME 突入！** 🔥\nルメンちゃんが溜まったRuで最高にハイになっています！"
 
-            await db.execute("""
-                INSERT INTO transactions (sender_id, receiver_id, amount, type, description)
-                VALUES (?, ?, ?, 'GAMBLE', 'チンチロ勝負')
-            """, (user.id if multiplier < 0 else 0, 0 if multiplier < 0 else user.id, abs(bet * multiplier)))
+                embed.color = 0xff0000
+                res_msg = f"**結果: -{actual_loss:,} Ru**"
             await db.commit()
 
-        embed.description = f"{res_msg}\n\n{comment}"
+        embed.description = f"{res_msg}\n\n「{comment}」"
+        embed.set_footer(text=f"連勝: {self.win_streaks.get(user.id, 0)} | 負け越し: {self.user_bad_luck.get(user.id, 0)}")
         await msg.edit(embed=embed)
 
 # --- Cog: ServerStats (サーバー経済統計 & グラフ) ---
