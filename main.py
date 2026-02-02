@@ -108,12 +108,10 @@ def has_permission(required_level: str):
 class BankDatabase:
     def __init__(self, db_path="lumen_bank_v4.db"):
         self.db_path = db_path
-
     async def setup(self, conn):
-        
+        # 高速化設定
         await conn.execute("PRAGMA journal_mode=WAL")
         await conn.execute("PRAGMA synchronous=NORMAL")
-
 
         # 1. 口座・取引
         await conn.execute("""CREATE TABLE IF NOT EXISTS accounts (
@@ -138,6 +136,12 @@ class BankDatabase:
         await conn.execute("CREATE TABLE IF NOT EXISTS server_config (key TEXT PRIMARY KEY, value TEXT)")
         await conn.execute("CREATE TABLE IF NOT EXISTS role_wages (role_id INTEGER PRIMARY KEY, amount INTEGER NOT NULL)")
         await conn.execute("CREATE TABLE IF NOT EXISTS admin_roles (role_id INTEGER PRIMARY KEY, perm_level TEXT)")
+        
+        # ★ ここを追加！ ユーザーごとの設定（DM通知のON/OFFなど）を保存するテーブル
+        await conn.execute("""CREATE TABLE IF NOT EXISTS user_settings (
+            user_id INTEGER PRIMARY KEY, 
+            dm_salary_enabled INTEGER DEFAULT 1
+        )""")
 
         # 3. VC関連
         await conn.execute("CREATE TABLE IF NOT EXISTS voice_stats (user_id INTEGER PRIMARY KEY, total_seconds INTEGER DEFAULT 0)")
@@ -153,12 +157,13 @@ class BankDatabase:
 
         await conn.execute("CREATE TABLE IF NOT EXISTS reward_channels (channel_id INTEGER PRIMARY KEY)")
 
-        # 4. インデックス
+        # 4. インデックス（検索を速くする）
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_trans_receiver ON transactions (receiver_id, created_at DESC)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_temp_vc_expire ON temp_vcs (expire_at)")
 
         await conn.commit()
 
+    
 # --- UI: VC内操作パネル  ---
 class VCControlView(discord.ui.View):
     def __init__(self):
@@ -541,61 +546,50 @@ class Economy(commands.Cog):
         latency = round(self.bot.latency * 1000)
         await interaction.response.send_message(f"🏓 Pong! Latency: `{latency}ms`", ephemeral=True)
 
-    @app_commands.command(name="残高確認", description="残高を確認します")
+    # --- 1. 残高確認 (デザイン修正) ---
+    @app_commands.command(name="残高確認", description="現在の所持金を確認します")
     async def balance(self, interaction: discord.Interaction, member: Optional[discord.Member] = None):
         await interaction.response.defer(ephemeral=True)
-
         target = member or interaction.user
         
-        # 他人の口座を見る場合のみ権限チェック
+        # 権限チェック (他人の口座を見る場合)
         if target.id != interaction.user.id:
-            has_perm = False
-            if await self.bot.is_owner(interaction.user):
-                has_perm = True
-            else:
-                user_role_ids = [role.id for role in interaction.user.roles]
-                admin_roles = self.bot.config.admin_roles
-                for r_id in user_role_ids:
-                    if r_id in admin_roles and admin_roles[r_id] in ["SUPREME_GOD", "GODDESS"]:
-                        has_perm = True
-                        break
-            if not has_perm:
+            if not await self.check_admin_permission(interaction.user):
                 return await interaction.followup.send("❌ 他人の口座を参照する権限がありません。", ephemeral=True)
 
         async with self.bot.get_db() as db:
-            # ★修正: total_earned は取得しなくてOK
             async with db.execute("SELECT balance FROM accounts WHERE user_id = ?", (target.id,)) as cursor:
                 row = await cursor.fetchone()
                 bal = row['balance'] if row else 0
         
-        embed = discord.Embed(title="🏛 ルーメン口座照会", color=0xFFD700)
-        embed.set_author(name=f"{target.display_name} 様の口座情報", icon_url=target.display_avatar.url)
-        embed.add_field(name="💰 現在の残高", value=f"**{bal:,}** L", inline=False)
-        # ★修正: 累計獲得額の表示を削除しました
-        
-        embed.set_footer(text=f"Server: {interaction.guild.name}")
+        embed = discord.Embed(title="🏛 ルーメン銀行 口座照会", color=0xFFD700)
+        embed.set_author(name=f"{target.display_name} 様", icon_url=target.display_avatar.url)
+        embed.add_field(name="💰 現在の残高", value=f"**{bal:,} Ru**", inline=False)
+        embed.set_footer(text=f"Elysion Economy System")
         embed.set_thumbnail(url=target.display_avatar.url)
         
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="送金", description="送金処理")
-    async def transfer(self, interaction: discord.Interaction, receiver: discord.Member, amount: int):
-        # まずは基本的なチェックだけして、確認ボタンを出す
+    # --- 2. 送金コマンド (確認ボタン呼び出し) ---
+    @app_commands.command(name="送金", description="他のユーザーにRuを送金します")
+    @app_commands.describe(receiver="送金相手", amount="送金額", message="相手へのメッセージ（任意）")
+    async def transfer(self, interaction: discord.Interaction, receiver: discord.Member, amount: int, message: str = "送金"):
         if amount <= 0: return await interaction.response.send_message("❌ 1 Ru 以上を指定してください。", ephemeral=True)
         if amount > 10000000: return await interaction.response.send_message("❌ 1回の送金上限は 10,000,000 Ru です。", ephemeral=True)
         if receiver.id == interaction.user.id: return await interaction.response.send_message("❌ 自分自身には送金できません。", ephemeral=True)
         if receiver.bot: return await interaction.response.send_message("❌ Botには送金できません。", ephemeral=True)
 
-        # 確認Embedを作成
         embed = discord.Embed(title="⚠️ 送金確認", description="以下の内容で送金しますか？", color=discord.Color.orange())
-        embed.add_field(name="送金先", value=receiver.mention, inline=False)
-        embed.add_field(name="金額", value=f"**{amount:,} L**", inline=False)
+        embed.add_field(name="👤 送金先", value=receiver.mention, inline=True)
+        embed.add_field(name="💰 金額", value=f"**{amount:,} Ru**", inline=True)
+        embed.add_field(name="💬 メッセージ", value=f"`{message}`", inline=False)
         
-        # ボタン付きViewを作成して送信
-        view = TransferConfirmView(self.bot, interaction.user, receiver, amount)
+        # 下記で定義する View を呼び出す
+        view = TransferConfirmView(self.bot, interaction.user, receiver, amount, message)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    @app_commands.command(name="履歴", description="直近の全ての入出金履歴を表示します")
+    # --- 3. 取引履歴 (Ru表記へ修正) ---
+    @app_commands.command(name="履歴", description="直近10件の入出金履歴を表示します")
     async def history(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         async with self.bot.get_db() as db:
@@ -609,13 +603,10 @@ class Economy(commands.Cog):
         for r in rows:
             is_sender = r['sender_id'] == interaction.user.id
             emoji = "📤 送金" if is_sender else "📥 受取"
-            amount_str = f"{'-' if is_sender else '+'}{r['amount']:,} L"
+            amount_str = f"{'-' if is_sender else '+'}{r['amount']:,} Ru"
             
-            if r['sender_id'] == 0 or r['receiver_id'] == 0:
-                target_name = "システム"
-            else:
-                target_id = r['receiver_id'] if is_sender else r['sender_id']
-                target_name = f"<@{target_id}>"
+            target_id = r['receiver_id'] if is_sender else r['sender_id']
+            target_name = f"<@{target_id}>" if target_id != 0 else "システム"
 
             embed.add_field(
                 name=f"{r['created_at'][5:16]} | {emoji}",
@@ -624,13 +615,100 @@ class Economy(commands.Cog):
             )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
+    async def check_admin_permission(self, user):
+        if await self.bot.is_owner(user): return True
+        user_role_ids = [role.id for role in user.roles]
+        admin_roles = self.bot.config.admin_roles
+        for r_id in user_role_ids:
+            if r_id in admin_roles and admin_roles[r_id] in ["SUPREME_GOD", "GODDESS"]:
+                return True
+        return False
+
+class TransferConfirmView(discord.ui.View):
+    def __init__(self, bot, sender, receiver, amount, message):
+        super().__init__(timeout=60)
+        self.bot = bot
+        self.sender = sender
+        self.receiver = receiver
+        self.amount = amount
+        self.msg = message
+
+    @discord.ui.button(label="送金を実行する", style=discord.ButtonStyle.green)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        
+        async with self.bot.get_db() as db:
+            # 送金元の残高チェック
+            async with db.execute("SELECT balance FROM accounts WHERE user_id = ?", (self.sender.id,)) as c:
+                row = await c.fetchone()
+                if not row or row['balance'] < self.amount:
+                    return await interaction.followup.send("❌ 残高が不足しています。", ephemeral=True)
+
+            try:
+                # 送金処理
+                await db.execute("UPDATE accounts SET balance = balance - ? WHERE user_id = ?", (self.amount, self.sender.id))
+                await db.execute("""
+                    INSERT INTO accounts (user_id, balance) VALUES (?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET balance = balance + excluded.balance
+                """, (self.receiver.id, self.amount))
+                
+                # 履歴保存
+                await db.execute("""
+                    INSERT INTO transactions (sender_id, receiver_id, amount, type, description)
+                    VALUES (?, ?, ?, 'TRANSFER', ?)
+                """, (self.sender.id, self.receiver.id, self.amount, self.msg))
+                
+                await db.commit()
+                self.stop()
+                await interaction.followup.send(f"✅ {self.receiver.mention} へ {self.amount:,} Ru 送金しました。", ephemeral=True)
+
+                # ★ 受取通知 DM (画像 1000004644.png の再現)
+                try:
+                    # DM通知設定を確認（Salaryで追加した設定を流用）
+                    async with db.execute("SELECT dm_salary_enabled FROM user_settings WHERE user_id = ?", (self.receiver.id,)) as c:
+                        res = await c.fetchone()
+                        if res and res['dm_salary_enabled'] == 0: return # 通知OFFなら送らない
+
+                    embed = discord.Embed(title="💰 Ru_men受取通知", color=discord.Color.green())
+                    embed.add_field(name="送金者", value=self.sender.mention, inline=False)
+                    embed.add_field(name="受取額", value=f"**{self.amount:,} Ru**", inline=False)
+                    embed.add_field(name="メッセージ", value=f"`{self.msg}`", inline=False)
+                    embed.timestamp = datetime.datetime.now()
+                    
+                    await self.receiver.send(embed=embed)
+                except:
+                    pass # DMが閉鎖されている場合は無視
+
+            except Exception as e:
+                await db.rollback()
+                await interaction.followup.send(f"❌ エラーが発生しました: {e}", ephemeral=True)
+
 class Salary(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    # --- 1. 一括給与支給コマンド ---
-    @app_commands.command(name="一括給与", description="【最高神】設定された全役職の給与を合算して一斉支給します")
-    @has_permission("SUPREME_GOD") # 既存の権限デコレータ
+    # --- 1. 給与通知設定コマンド ---
+    @app_commands.command(name="給与通知設定", description="給与支給時のDM明細通知をON/OFFします")
+    @app_commands.describe(status="ON: 通知を受け取る / OFF: 通知しない")
+    @app_commands.choices(status=[
+        app_commands.Choice(name="ON (通知する)", value=1),
+        app_commands.Choice(name="OFF (通知しない)", value=0)
+    ])
+    async def toggle_dm(self, interaction: discord.Interaction, status: int):
+        async with self.bot.get_db() as db:
+            await db.execute("""
+                INSERT INTO user_settings (user_id, dm_salary_enabled) 
+                VALUES (?, ?) 
+                ON CONFLICT(user_id) DO UPDATE SET dm_salary_enabled = excluded.dm_salary_enabled
+            """, (interaction.user.id, status))
+            await db.commit()
+        
+        msg = "✅ 今後、給与明細は **DMで通知されます**。" if status == 1 else "🔕 今後、給与明細の **DM通知は行われません**。"
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    # --- 2. 一括給与支給コマンド (明細生成・DM送信対応) ---
+    @app_commands.command(name="一括給与", description="【最高神】全役職の給与を合算支給し、明細をDM送信します")
+    @has_permission("SUPREME_GOD")
     async def distribute_all(self, interaction: discord.Interaction):
         await interaction.response.defer()
         
@@ -638,83 +716,112 @@ class Salary(commands.Cog):
         month_tag = now.strftime("%Y-%m")
         batch_id = str(uuid.uuid4())[:8]
         
-        # 1. 給与設定の読み込み
+        # 設定の読み込み
         wage_dict = {}
+        dm_prefs = {}
         async with self.bot.get_db() as db:
-            async with db.execute("SELECT role_id, amount FROM role_wages") as cursor:
-                async for row in cursor:
-                    wage_dict[int(row['role_id'])] = int(row['amount'])
+            async with db.execute("SELECT role_id, amount FROM role_wages") as c:
+                async for r in c: wage_dict[int(r['role_id'])] = int(r['amount'])
+            async with db.execute("SELECT user_id, dm_salary_enabled FROM user_settings") as c:
+                async for r in c: dm_prefs[int(r['user_id'])] = bool(r['dm_salary_enabled'])
 
         if not wage_dict:
-            return await interaction.followup.send("⚠️ 給与設定が見つかりません。`/config_set_wage` 等で設定してください。")
+            return await interaction.followup.send("⚠️ 給与設定が見つかりません。")
         
-        # 2. メンバーの集計
         count = 0
-        total_amount = 0
-        role_breakdown = {} # ロール別内訳用
-        account_updates = []
-        transaction_records = []
+        total_payout = 0
+        role_summary = {}
+        payout_data_list = [] # DM送信用のデータ保持用
 
         # メンバーリストの取得
         members = interaction.guild.members if interaction.guild.chunked else [m async for m in interaction.guild.fetch_members()]
 
-        for member in members:
-            if member.bot: continue
-            
-            # 対象ロールをすべて抽出
-            matching_wages = [(wage_dict[r.id], r) for r in member.roles if r.id in wage_dict]
-            if not matching_wages: continue
-            
-            # ★ 改修ポイント: すべての該当ロール給与を合算
-            member_total_wage = sum(w for w, _ in matching_wages)
-            
-            account_updates.append((member.id, member_total_wage, member_total_wage))
-            transaction_records.append((0, member.id, member_total_wage, 'SALARY', batch_id, month_tag, f"{month_tag} 給与(合算)"))
-            
-            count += 1
-            total_amount += member_total_wage
-            
-            # 内訳レポートの集計
-            for wage, role in matching_wages:
-                if role.id not in role_breakdown:
-                    role_breakdown[role.id] = {"name": role.name, "count": 0, "amount": 0, "mention": role.mention}
-                role_breakdown[role.id]["count"] += 1
-                role_breakdown[role.id]["amount"] += wage
-
-        if not account_updates:
-            return await interaction.followup.send("❌ 対象となる役職を持つメンバーがいませんでした。")
-
-        # 3. データベース一括更新
         async with self.bot.get_db() as db:
-            try:
-                # システム用アカウント(ID:0)の確保
-                await db.execute("INSERT OR IGNORE INTO accounts (user_id, balance, total_earned) VALUES (0, 0, 0)")
+            for member in members:
+                if member.bot: continue
                 
-                # 残高と累計獲得額の更新 (UPSERT)
-                await db.executemany("""
+                # 該当ロールを抽出
+                matching = [(wage_dict[r.id], r) for r in member.roles if r.id in wage_dict]
+                if not matching: continue
+                
+                member_total = sum(w for w, _ in matching)
+                
+                # DB更新
+                await db.execute("""
                     INSERT INTO accounts (user_id, balance, total_earned) VALUES (?, ?, ?)
                     ON CONFLICT(user_id) DO UPDATE SET 
-                    balance = balance + excluded.balance,
-                    total_earned = total_earned + excluded.total_earned
-                """, account_updates)
+                    balance = balance + excluded.balance, total_earned = total_earned + excluded.total_earned
+                """, (member.id, member_total, member_total))
                 
-                # 取引履歴の挿入
-                await db.executemany("""
+                await db.execute("""
                     INSERT INTO transactions (sender_id, receiver_id, amount, type, batch_id, month_tag, description)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, transaction_records)
-                
-                await db.commit()
-            except Exception as e:
-                await db.rollback()
-                logger.error(f"Database Error in distribute_all: {e}")
-                return await interaction.followup.send(f"❌ DB更新中にエラーが発生しました。")
+                    VALUES (0, ?, ?, 'SALARY', ?, ?, ?)
+                """, (member.id, member_total, batch_id, month_tag, f"{month_tag} 給与"))
 
-        # 4. 完了報告とログ送信
-        await interaction.followup.send(f"💰 **一括支給完了** (BatchID: `{batch_id}`)\n人数: {count}名 / 総額: {total_amount:,} Ru")
+                # ログ・内訳用集計
+                count += 1
+                total_payout += member_total
+                for w, r in matching:
+                    if r.id not in role_summary: role_summary[r.id] = {"mention": r.mention, "count": 0, "amount": 0}
+                    role_summary[r.id]["count"] += 1
+                    role_summary[r.id]["amount"] += w
 
-        await self.send_salary_log(interaction, batch_id, total_amount, count, role_breakdown, now)
-# --- 2. 給与一覧表示コマンド (新規) ---
+                # DM送信対象であればリストに追加
+                if dm_prefs.get(member.id, True): # デフォルトはON
+                    payout_data_list.append((member, member_total, matching))
+
+            await db.commit()
+
+        # DM送信実行
+        sent_dm = 0
+        for m, total, matching in payout_data_list:
+            try:
+                embed = self.create_salary_slip_embed(m, total, matching, month_tag)
+                await m.send(embed=embed)
+                sent_dm += 1
+            except: pass # DM拒否設定などはスルー
+
+        await interaction.followup.send(f"💰 **一括支給完了** (ID: `{batch_id}`)\n人数: {count}名 / 総額: {total_payout:,} Ru\n通知送信: {sent_dm}名")
+        await self.send_salary_log(interaction, batch_id, total_payout, count, role_summary, now)
+
+    # --- 3. 給与明細作成 (画像再現ロジック) ---
+    def create_salary_slip_embed(self, member, total, matching, month_tag):
+        # 金額の高い順に並び替え
+        sorted_matching = sorted(matching, key=lambda x: x[0], reverse=True)
+        main_role = sorted_matching[0][1] # 一番高い給与のロール
+        
+        embed = discord.Embed(
+            title="💰 月給支給のお知らせ",
+            description=f"**{month_tag}** の月給が支給されました！",
+            color=0x00FF00, # 画像に合わせた緑色
+            timestamp=datetime.datetime.now()
+        )
+        
+        embed.add_field(name="💵 支給総額", value=f"**{total:,} Ru**", inline=False)
+        
+        # 計算式の作成 (例: 500,000 + 50,000...)
+        formula = " + ".join([f"{w:,}" for w, r in sorted_matching])
+        embed.add_field(name="🧮 計算式", value=f"{formula} = **{total:,} Ru**", inline=False)
+        
+        # 内訳の作成
+        breakdown = "\n".join([f"{i+1}. {r.name}: {w:,} Ru" for i, (w, r) in enumerate(sorted_matching)])
+        embed.add_field(name="📊 給与内訳", value=breakdown, inline=False)
+        
+        embed.add_field(name="🏆 メインロール", value=main_role.name, inline=True)
+        embed.add_field(name="🔢 適用ロール数", value=f"{len(matching)}個", inline=True)
+        embed.add_field(name="📅 支給月", value=month_tag, inline=True)
+
+        if len(matching) > 1:
+            embed.add_field(
+                name="⚠️ 複数ロール適用", 
+                value="あなたは複数の給与対象ロールを持っているため、全ての給与が合算されて支給されています。", 
+                inline=False
+            )
+        
+        embed.set_footer(text="給与計算についてご質問がありましたら管理者にお声がけください")
+        return embed
+
+    # --- 4. 給与一覧表示 ---
     @app_commands.command(name="給与一覧", description="現在設定されている役職ごとの給与テーブルを表示します")
     async def list_wages(self, interaction: discord.Interaction):
         async with self.bot.get_db() as db:
@@ -734,7 +841,7 @@ class Salary(commands.Cog):
         embed.description = text
         await interaction.response.send_message(embed=embed)
 
-    # --- 3. ロールバックコマンド ---
+    # --- 5. ロールバックコマンド ---
     @app_commands.command(name="一括給与取り消し", description="【最高神】識別ID(Batch ID)を指定して給与支給を取り消します")
     @has_permission("SUPREME_GOD")
     async def salary_rollback(self, interaction: discord.Interaction, batch_id: str):
@@ -753,9 +860,7 @@ class Salary(commands.Cog):
             try:
                 for row in rows:
                     await db.execute("""
-                        UPDATE accounts SET 
-                        balance = balance - ?, 
-                        total_earned = total_earned - ? 
+                        UPDATE accounts SET balance = balance - ?, total_earned = total_earned - ? 
                         WHERE user_id = ?
                     """, (row['amount'], row['amount'], row['receiver_id']))
                 
@@ -764,11 +869,11 @@ class Salary(commands.Cog):
             except Exception as e:
                 await db.rollback()
                 logger.error(f"Rollback Error: {e}")
-                return await interaction.followup.send("❌ ロールバック中にエラーが発生しました。")
+                return await interaction.followup.send("❌ エラーが発生しました。")
 
-        await interaction.followup.send(f"↩️ **ロールバック完了**\nID: `{batch_id}` の {count}名分 ({total_reverted:,} Ru) を回収しました。")
-    
-    # --- 共通: ログ送信処理 ---
+        await interaction.followup.send(f"↩️ **ロールバック完了**\nID: `{batch_id}` の支給を回収しました。")
+
+    # --- 6. 共通: ログ送信 ---
     async def send_salary_log(self, interaction, batch_id, total, count, breakdown, timestamp):
         log_ch_id = None
         async with self.bot.get_db() as db:
@@ -786,11 +891,12 @@ class Salary(commands.Cog):
         
         breakdown_text = "\n".join([f"✅ {d['mention']}: {d['amount']:,} Ru ({d['count']}名)" for d in breakdown.values()])
         if breakdown_text:
-            embed.add_field(name="ロール別支給内訳", value=breakdown_text, inline=False)
+            embed.add_field(name="ロール別内訳", value=breakdown_text, inline=False)
         
         embed.set_footer(text=f"BatchID: {batch_id}")
         await channel.send(embed=embed)
 
+    
 
 # --- Cog: VoiceSystem  ---
 class VoiceSystem(commands.Cog):
@@ -942,7 +1048,62 @@ class VoiceSystem(commands.Cog):
         except Exception as e:
             logger.error(f"Recovery Error: {e}")
 
+class VoiceHistory(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
 
+    # --- VC記録確認コマンド (女神以上) ---
+    @app_commands.command(name="vc記録", description="【女神以上】指定したユーザーのVC累計滞在時間を画像で表示します")
+    @app_commands.describe(member="確認したいユーザー")
+    @has_permission("GODDESS") # 以前作成した権限チェック（女神 = index 1, 最高神 = 0 が実行可能）
+    async def vc_history(self, interaction: discord.Interaction, member: discord.Member):
+        await interaction.response.defer()
+
+        # 1. データベースから累計秒数を取得
+        async with self.bot.get_db() as db:
+            async with db.execute("SELECT total_seconds FROM voice_stats WHERE user_id = ?", (member.id,)) as cursor:
+                row = await cursor.fetchone()
+                total_seconds = row['total_seconds'] if row else 0
+
+        # 2. 時間の計算 (秒 -> 時間・分)
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        
+        # 3. 画像の生成 (Pillowを使用)
+        # 600x300のダークテーマなカードを作成
+        img = Image.new('RGB', (600, 300), color=(44, 47, 51)) # Discord風の背景色
+        draw = ImageDraw.Draw(img)
+        
+        # フォント設定 (サーバー内のパスに合わせて調整が必要な場合があります)
+        try:
+            # Linux標準のフォントパス例
+            font_main = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 40)
+            font_sub = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 25)
+        except:
+            font_main = ImageFont.load_default()
+            font_sub = ImageFont.load_default()
+
+        # テキストの描画
+        draw.text((40, 40), f"VC STATS: {member.display_name}", fill=(255, 255, 255), font=font_sub)
+        draw.text((40, 100), f"{hours} hours {minutes} mins", fill=(0, 255, 127), font=font_main)
+        draw.text((40, 180), f"Total Seconds: {total_seconds:,}s", fill=(185, 187, 190), font=font_sub)
+        
+        # 下部に装飾ライン
+        draw.rectangle([40, 240, 560, 245], fill=(114, 137, 218))
+
+        # 画像をバイナリとして保存
+        img_byte_arr = io.BytesIO()
+        img.save(img_byte_arr, format='PNG')
+        img_byte_arr.seek(0)
+        
+        # 4. ファイルとして送信
+        file = discord.File(fp=img_byte_arr, filename=f"vc_stats_{member.id}.png")
+        
+        embed = discord.Embed(title="📊 VC滞在記録照会", color=0x7289da)
+        embed.set_image(url=f"attachment://vc_stats_{member.id}.png")
+        embed.set_footer(text=f"Requested by {interaction.user.display_name}")
+        
+        await interaction.followup.send(embed=embed, file=file)
 
 # --- Cog: InterviewSystem  ---
 class InterviewSystem(commands.Cog):
@@ -1700,46 +1861,47 @@ class AdminTools(commands.Cog):
         await self.bot.config.reload()
         await interaction.followup.send(f"✅ 過去 **{days}日間** に取引がないメンバーを、経済統計から除外するように設定しました。", ephemeral=True)
 
-
 # --- Bot 本体 ---
 class LumenBankBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
-        intents.members = True          
-        intents.voice_states = True     
-        intents.message_content = True
-        super().__init__(command_prefix="!", intents=intents)
+        intents.members = True          # メンバー取得用
+        intents.voice_states = True     # VC状態監視用
+        intents.message_content = True  # メッセージコマンド用
+        
+        super().__init__(
+            command_prefix="!", 
+            intents=intents,
+            help_command=None
+        )
         
         self.db_path = "lumen_bank_v4.db"
         self.db_manager = BankDatabase(self.db_path)
         self.config = ConfigManager(self)
 
-    
     @contextlib.asynccontextmanager
     async def get_db(self):
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            
-            # --- ここが追加した「保険」です ---
             # 1. データの矛盾（幽霊ユーザーなど）を許さない設定
             await db.execute("PRAGMA foreign_keys = ON")
-            
-            # 2. DBが混雑していても、エラーで即死せずに5秒間待ってリトライする設定
-            # これをここでやることで、全てのコマンドで「Botが止まる」のを防げます
+            # 2. DB混雑時に5秒間リトライする設定
             await db.execute("PRAGMA busy_timeout = 5000")
-            # -------------------------------
-            
             yield db
 
     async def setup_hook(self):
+        # データベースの初期セットアップ
         async with self.get_db() as db:
             await self.db_manager.setup(db)
         
+        # 設定の読み込み
         await self.config.reload()
         
-        # 永続的なViewを登録
+        # 永続的なView（ボタンなど）の登録
         self.add_view(VCPanel())
         
+        # 各種機能（Cog）の読み込み
+        # ★ ここをすべて self.add_cog に修正し、VoiceHistory を追加しました
         await self.add_cog(Economy(self))
         await self.add_cog(Salary(self))
         await self.add_cog(VoiceSystem(self))
@@ -1747,8 +1909,14 @@ class LumenBankBot(commands.Bot):
         await self.add_cog(PrivateVCManager(self))
         await self.add_cog(InterviewSystem(self))
         await self.add_cog(ServerStats(self))
-        await bot.add_cog(ShopSystem(bot))
-        self.backup_db_task.start()
+        await self.add_cog(ShopSystem(self))    # bot -> self に修正
+        await self.add_cog(VoiceHistory(self))   # 【新機能】VC記録画像表示を追加
+        
+        # バックアップタスクの開始
+        if not self.backup_db_task.is_running():
+            self.backup_db_task.start()
+        
+        # Discord側へのコマンド同期
         await self.tree.sync()
         logger.info("LumenBank System: Setup complete and Synced.")
 
@@ -1764,6 +1932,7 @@ class LumenBankBot(commands.Bot):
     @tasks.loop(hours=24)
     async def backup_db_task(self):
         import shutil
+        import datetime
         backup_name = f"backup_{datetime.datetime.now().strftime('%Y%m%d')}.db"
         try:
             shutil.copy2(self.db_path, backup_name)
@@ -1775,10 +1944,13 @@ class LumenBankBot(commands.Bot):
         print(f"Logged in as {self.user} (ID: {self.user.id})")
         print("--- Lumen Bank System Online ---")
 
+# --- 実行ブロック ---
 if __name__ == "__main__":
     if not TOKEN:
         logger.error("DISCORD_TOKEN is missing")
     else:
-        keep_alive.keep_alive()
+        # Flask(keep_alive)が必要な場合は有効に、不要ならコメントアウト
+        # keep_alive.keep_alive() 
+        
         bot = LumenBankBot()
         bot.run(TOKEN)
