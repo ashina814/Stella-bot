@@ -1260,6 +1260,102 @@ class InterviewSystem(commands.Cog):
 
                 await channel.send(embed=log_embed)
 
+class Chinchiro(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.dice_emojis = ["", "⚀", "⚁", "⚂", "⚃", "⚄", "⚅"]
+
+    def roll_dice(self):
+        dice = [random.randint(1, 6) for _ in range(3)]
+        dice.sort()
+        if dice[0] == dice[1] == dice[2]: return dice, 100 + dice[0], f"嵐 ({dice[0]})"
+        if dice == [4, 5, 6]: return dice, 90, "シゴロ"
+        if dice == [1, 2, 3]: return dice, -1, "ヒフミ"
+        if dice[0] == dice[1]: return dice, dice[2], f"{dice[2]}の目"
+        if dice[1] == dice[2]: return dice, dice[0], f"{dice[0]}の目"
+        if dice[0] == dice[2]: return dice, dice[1], f"{dice[1]}の目"
+        return dice, 0, "目なし"
+
+    @app_commands.command(name="チンチロ", description="Ruを賭けて勝負！(※女神の加護で親が絶対有利だよ♡)")
+    async def chinchiro(self, interaction: discord.Interaction, bet: int):
+        if bet < 100: return await interaction.response.send_message("最低100Ruからだよ、ケチらないでよね？", ephemeral=True)
+        
+        await interaction.response.defer()
+        user = interaction.user
+
+        async with self.bot.get_db() as db:
+            async with db.execute("SELECT balance FROM accounts WHERE user_id = ?", (user.id,)) as c:
+                row = await c.fetchone()
+                if not row or row['balance'] < bet:
+                    return await interaction.followup.send("お財布空っぽじゃん、ざぁこ♡ 稼いできてから出直してよ。")
+
+        embed = discord.Embed(title="🎲 チンチロリン・Elysion", color=0x2f3136)
+        embed.set_author(name=f"{user.display_name}の挑戦♡", icon_url=user.display_avatar.url)
+        embed.add_field(name="賭け金", value=f"{bet:,} Ru", inline=False)
+        msg = await interaction.followup.send(embed=embed)
+
+        # --- 親の番 ---
+        embed.add_field(name="親(Bot)の出目", value="くるくる...", inline=True)
+        await asyncio.sleep(1.5)
+        p_dice, p_score, p_name = self.roll_dice()
+        p_str = " ".join([self.dice_emojis[d] for d in p_dice])
+        embed.set_field_at(1, name="親(Bot)の出目", value=f"**{p_name}**\n`{p_str}`", inline=True)
+        await msg.edit(embed=embed)
+
+        if p_score >= 90:
+            return await self.process_result(interaction, msg, embed, user, bet, "lose", "親の強役だもん！文句ある？全部没収ね♡")
+
+        # --- 子の番 ---
+        embed.add_field(name="あなたの出目", value="くるくる...", inline=True)
+        await asyncio.sleep(1.5)
+        u_dice, u_score, u_name = self.roll_dice()
+        u_str = " ".join([self.dice_emojis[d] for d in u_dice])
+        embed.set_field_at(2, name="あなたの出目", value=f"**{u_name}**\n`{u_str}`", inline=True)
+        await msg.edit(embed=embed)
+
+        # --- 判定ロジック ---
+        if u_score == -1: # ヒフミ
+            await self.process_result(interaction, msg, embed, user, bet, "lose_double", "えっ、ヒフミ！？うわぁ…ダッサ♡ おバカさんには「2倍」払ってもらうね！")
+        elif u_score > p_score:
+            res_type = "win_triple" if u_score > 100 else "win_double" if u_score == 90 else "win"
+            await self.process_result(interaction, msg, embed, user, bet, res_type, "チッ…運だけはいいんだね。ほら、女神への奉納金を引いた残額だよ。ありがたく受け取りなよ。")
+        elif u_score == p_score:
+            await self.process_result(interaction, msg, embed, user, bet, "lose", "同点は親の勝ちだよ！ルールも知らないの？Ruは美味しく焼却してあげるね♡")
+        else:
+            await self.process_result(interaction, msg, embed, user, bet, "lose", "はい負けー♡ そのRuはElysionのゴミ箱行きでーす！お疲れ様♡")
+
+    async def process_result(self, interaction, msg, embed, user, bet, result, comment):
+        multiplier = 0
+        if "win_triple" in result: multiplier = 3
+        elif "win_double" in result: multiplier = 2
+        elif "win" in result: multiplier = 1
+        elif "lose_double" in result: multiplier = -2
+        else: multiplier = -1
+
+        async with self.bot.get_db() as db:
+            if multiplier > 0:
+                raw_payout = bet * multiplier
+                tax = int(raw_payout * 0.1) # 10%焼却
+                final_payout = raw_payout - tax
+                await db.execute("UPDATE accounts SET balance = balance + ? WHERE user_id = ?", (final_payout, user.id))
+                embed.color = 0x00ff00
+                res_msg = f"**結果: +{final_payout:,} Ru** (奉納金: {tax} Ru)"
+            else:
+                loss_amount = bet * abs(multiplier)
+                await db.execute("UPDATE accounts SET balance = balance - ? WHERE user_id = ?", (loss_amount, user.id))
+                await db.execute("UPDATE accounts SET balance = balance + ? WHERE user_id = 0", (loss_amount,))
+                embed.color = 0xff0000
+                res_msg = f"**結果: -{loss_amount:,} Ru**"
+
+            await db.execute("""
+                INSERT INTO transactions (sender_id, receiver_id, amount, type, description)
+                VALUES (?, ?, ?, 'GAMBLE', 'チンチロ勝負')
+            """, (user.id if multiplier < 0 else 0, 0 if multiplier < 0 else user.id, abs(bet * multiplier)))
+            await db.commit()
+
+        embed.description = f"{res_msg}\n\n{comment}"
+        await msg.edit(embed=embed)
+
 # --- Cog: ServerStats (サーバー経済統計 & グラフ) ---
 class ServerStats(commands.Cog):
     def __init__(self, bot):
@@ -1910,7 +2006,8 @@ class LumenBankBot(commands.Bot):
         await self.add_cog(InterviewSystem(self))
         await self.add_cog(ServerStats(self))
         await self.add_cog(ShopSystem(self))    # bot -> self に修正
-        await self.add_cog(VoiceHistory(self))   # 【新機能】VC記録画像表示を追加
+        await self.add_cog(VoiceHistory(self))  
+        await self.add_cog(Chinchiro(self)) # 【新機能】VC記録画像表示を追加
         
         # バックアップタスクの開始
         if not self.backup_db_task.is_running():
