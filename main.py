@@ -9,6 +9,7 @@ from discord.ext import commands, tasks
 from discord import app_commands, ui
 import aiosqlite
 import datetime
+import random
 import uuid
 import asyncio
 import logging
