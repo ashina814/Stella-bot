@@ -1387,27 +1387,37 @@ class InterviewSystem(commands.Cog):
 
                 await channel.send(embed=log_embed)
 
+# 激アツ絵文字 (サーバーになければ 🔥 で代用されます)
+GEKIATSU = "🔥" 
 
-# 激アツ絵文字
-GEKIATSU = "<:b_069:1438962326463054008>"
-
-# --- ANSI Color Helpers ---
+# --- 色をつける魔法の呪文 (ANSIコード) ---
+# これを使うと、テキストチャットで文字に色がつきます
 def ansi(text, color_code): return f"\x1b[{color_code}m{text}\x1b[0m"
-def red(t): return ansi(t, "1;31")
-def green(t): return ansi(t, "1;32")
-def yellow(t): return ansi(t, "1;33")
-def blue(t): return ansi(t, "1;34")
-def pink(t): return ansi(t, "1;35")
-def cyan(t): return ansi(t, "1;36")
-def white(t): return ansi(t, "1;37")
-def bg_red(t): return ansi(t, "0;41")
-def bold(t): return ansi(t, "1")
+def red(t): return ansi(t, "1;31")    # 赤 (危険、リーチ)
+def green(t): return ansi(t, "1;32")  # 緑 (ログ、説明)
+def yellow(t): return ansi(t, "1;33") # 金 (大当たり)
+def blue(t): return ansi(t, "1;34")   # 青 (枠線)
+def pink(t): return ansi(t, "1;35")   # ピンク (フィーバー)
+def cyan(t): return ansi(t, "1;36")   # 水色 (文字)
+def white(t): return ansi(t, "1;37")  # 白 (名前)
+def bg_red(t): return ansi(t, "0;41") # 背景赤 (強調)
 
+# --- 1行サイコロのデザイン ---
+# スマホでも崩れないように、[ :.: ] みたいな形にしています
+CYBER_DICE = {
+    1: "[  ●  ]", 
+    2: "[  :  ]",  
+    3: "[ .:. ]",  
+    4: "[ ::  ]",  
+    5: "[ :.: ]",  
+    6: "[ ::: ]",  
+    "?": "[ /// ]"
+}
 
-# --- View Classes ---
+# --- ボタンの設定 (View) ---
 
-# 今回はPVEのみですが、将来のために残すならこのままでOK
 class ChinchiroPVPApplyView(discord.ui.View):
+    """対戦の申し込みボタンです"""
     def __init__(self, cog, challenger, opponent, bet):
         super().__init__(timeout=60)
         self.cog = cog
@@ -1420,15 +1430,17 @@ class ChinchiroPVPApplyView(discord.ui.View):
         if self.message:
             try:
                 for child in self.children: child.disabled = True
-                await self.message.edit(content="⏰ タイムアウト。", view=self)
+                await self.message.edit(content="⏰ 時間切れです。勝負は流れました。", view=self)
             except: pass
 
     @discord.ui.button(label="受けて立つ！", style=discord.ButtonStyle.danger, emoji="⚔️")
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 申し込まれた人以外がボタンを押せないようにします
         if interaction.user != self.opponent:
             return await interaction.response.send_message("関係ない人は触らないで！", ephemeral=True)
         await interaction.response.defer()
         self.stop()
+        # ゲーム開始！
         await self.cog.start_pvp_game(interaction, self.challenger, self.opponent, self.bet)
 
     @discord.ui.button(label="逃げる", style=discord.ButtonStyle.secondary)
@@ -1437,131 +1449,13 @@ class ChinchiroPVPApplyView(discord.ui.View):
         await interaction.response.edit_message(content=f"💨 {self.opponent.display_name} は逃亡しました。", view=None, embed=None)
         self.stop()
 
-# ★ 修正ポイント：日本語ラベルに統一
 class ChinchiroTurnView(discord.ui.View):
+    """サイコロを振った後の「確定」か「振り直し」を選ぶボタンです"""
     def __init__(self, current_player, turn_count):
         super().__init__(timeout=60)
         self.current_player = current_player
         self.action = None
-        
-        # 3回目は「振り直す」を無効化
-        if turn_count >= 3:
-            for child in self.children:
-                if getattr(child, "label", "") == "振り直す":
-                    child.disabled = True
-                    child.label = "ラストチャンス！" # 日本語に変更
-                    child.style = discord.ButtonStyle.danger
-
-    @discord.ui.button(label="確定", style=discord.ButtonStyle.success, emoji="🔒") # シンプルに
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.current_player: return
-        await interaction.response.defer()
-        self.action = "confirm"
-        self.stop()
-
-    @discord.ui.button(label="振り直す", style=discord.ButtonStyle.secondary, emoji="🎲")
-    async def retry(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.current_player: return
-        await interaction.response.defer()
-        self.action = "retry"
-        self.stop()
-
-# ★ 修正ポイント：「勝ち逃げ」に変更
-class DoubleUpView(discord.ui.View):
-    def __init__(self, user):
-        super().__init__(timeout=45)
-        self.user = user
-        self.choice = None
-
-    @discord.ui.button(label="倍プッシュ (50%)", style=discord.ButtonStyle.danger, emoji="😈")
-    async def double(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.user: return
-        await interaction.response.defer()
-        self.choice = "double"
-        self.stop()
-
-    @discord.ui.button(label="勝ち逃げ", style=discord.ButtonStyle.primary, emoji="💰") # 雰囲気重視
-    async def collect(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.user: return
-        await interaction.response.defer()
-        self.choice = "collect"
-        self.stop()
-
-# --- 1行サイコロ (Cyber Bar Style) ---
-# [ :.: ] のように記号で目を表現するデジタルスタイル
-# これならスマホでも絶対に崩れません
-CYBER_DICE = {
-    1: "[  ●  ]", 
-    2: "[  :  ]",  # 縦に2つ
-    3: "[ .:. ]",  # 斜めに3つ
-    4: "[ ::  ]",  # 縦2列
-    5: "[ :.: ]",  # 5の目
-    6: "[ ::: ]",  # 6の目（縦3列）
-    "?": "[ /// ]"   # 回転中
-}
-
-# (中略... View Classes はそのままでOK) ...
-
-    # --- 修正メソッド1: サイコロ文字列生成 ---
-    # 1行スタイルなので、リストを結合するだけでOK
-    def get_cyber_dice_string(self, dice_list):
-        # [  ●  ]   [  :  ]   [ ::: ] のように横に並べる
-        row = "   ".join([CYBER_DICE.get(num, CYBER_DICE["?"]) for num in dice_list])
-        return row
-
-    # --- 修正メソッド2: HUDレンダリング (1行対応版) ---
-    def render_hud(self, player_name, dice_list, status, color_mode="blue", log_msg=""):
-        # 色設定
-        c_frame = cyan 
-        c_name = white
-        c_status = cyan
-
-        if color_mode == "red":
-            c_frame = red
-            c_status = red
-        elif color_mode == "gold":
-            c_frame = yellow
-            c_status = yellow
-        elif color_mode == "pink":
-            c_frame = pink
-            c_status = pink
-
-        # ステータス強調
-        if "リーチ" in status: c_status = bg_red
-        elif "神" in status: c_status = yellow
-        
-        # ログ
-        log_txt = green(f"▶ {log_msg}") if log_msg else blue("▶ ...")
-
-        # サイコロ行の生成 (1行)
-        dice_row = self.get_cyber_dice_string(dice_list)
-        
-        # UI構築 (スマホの幅に合わせて少しスリム化: 28文字幅)
-        hud = (
-            f"```ansi\n"
-            f"{c_frame('┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓')}\n"
-            f"{c_frame('┃')} {c_name(player_name.center(26))} {c_frame('┃')}\n"
-            f"{c_frame('┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫')}\n"
-            f"{c_frame('┃')}                          {c_frame('┃')}\n"
-            f"{c_frame('┃')} {dice_row.center(26)} {c_frame('┃')}\n"
-            f"{c_frame('┃')}                          {c_frame('┃')}\n"
-            f"{c_frame('┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫')}\n"
-            f"{c_frame('┃')} {c_status(status.center(26))} {c_frame('┃')}\n"
-            f"{c_frame('┃')} {log_txt.ljust(35)} {c_frame('┃')}\n"
-            f"{c_frame('┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛')}\n"
-            f"```"
-        )
-        return hud
-
-
-# --- View Classes ---
-
-class ChinchiroTurnView(discord.ui.View):
-    def __init__(self, current_player, turn_count):
-        super().__init__(timeout=60)
-        self.current_player = current_player
-        self.action = None
-        
+        # 3回目なら「振り直す」ボタンを押せなくします
         if turn_count >= 3:
             for child in self.children:
                 if getattr(child, "label", "") == "振り直す":
@@ -1584,6 +1478,7 @@ class ChinchiroTurnView(discord.ui.View):
         self.stop()
 
 class DoubleUpView(discord.ui.View):
+    """勝った時のダブルアップチャンス用ボタンです"""
     def __init__(self, user):
         super().__init__(timeout=45)
         self.user = user
@@ -1603,20 +1498,24 @@ class DoubleUpView(discord.ui.View):
         self.choice = "collect"
         self.stop()
 
-# --- 本体 ---
+# --- 本体 (Botの脳みそ) ---
 
 class Chinchiro(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.dice_emojis = ["⚀", "⚁", "⚂", "⚃", "⚄", "⚅"]
+        # ルメンちゃんの機嫌やフィーバー状態を管理する変数
         self.user_bad_luck = {} 
         self.hidden_fever_gauge = 0 
         self.fever_threshold = 1500000 
         self.fever_end_time = None
 
+    # サイコロを振って役を決める機能
     def get_roll_result(self):
         dice = [random.randint(1, 6) for _ in range(3)]
-        dice.sort()
+        dice.sort() # 小さい順に並べ替え
+        
+        # 役の強さと倍率を定義
         if dice == [1, 1, 1]: return dice, 111, "【極】ピンゾロ", 10, "🔥 神 降 臨 🔥", True
         if dice[0] == dice[1] == dice[2]: return dice, 100 + dice[0], f"嵐 ({dice[0]})", 3, "💪 激 強", True
         if dice == [4, 5, 6]: return dice, 90, "シゴロ (4-5-6)", 2, "✨ 勝利確定", False
@@ -1624,26 +1523,24 @@ class Chinchiro(commands.Cog):
         if dice[0] == dice[1]: return dice, dice[2], f"{dice[2]} の目", 1, "😐 通 常", False
         if dice[1] == dice[2]: return dice, dice[0], f"{dice[0]} の目", 1, "😐 通 常", False
         if dice[0] == dice[2]: return dice, dice[1], f"{dice[1]} の目", 1, "😐 通 常", False
+        # 役なし
         return dice, 0, "役なし (目なし)", 0, "💀 没収対象", False
 
-    # ★ 復活：文字化け (Glitch)
+    # ルメンちゃんのセリフが文字化けする演出
     def glitch_text(self, text, intensity=0.3):
         chars = list(text)
         glitch_chars = ["#", "$", "%", "&", "@", "?", "!", "ｧ", "ｨ", "ｩ", "ｪ", "ｫ", "ｱ", "ｲ", "ｳ"]
+        # 一定確率で文字をグチャグチャにします
         return "".join([c if random.random() > intensity else random.choice(glitch_chars) for c in chars])
 
-    # ★ サイコロAA結合
-    def get_mid_dice_art(self, dice_list):
-        rows = ["", "", ""] # 3行
-        for num in dice_list:
-            art = MEDIUM_DICE.get(num, MEDIUM_DICE["?"])
-            for i in range(3):
-                rows[i] += art[i] + " " # 間隔を少し空ける
-        return rows
+    # 1行サイコロの文字列を作る機能
+    def get_cyber_dice_string(self, dice_list):
+        row = "   ".join([CYBER_DICE.get(num, CYBER_DICE["?"]) for num in dice_list])
+        return row
 
-    # ★ HUDレンダリング (ネオンカジノ風)
+    # 画面（HUD）を作る機能
     def render_hud(self, player_name, dice_list, status, color_mode="blue", log_msg=""):
-        # 色設定
+        # 色の設定
         c_frame = cyan 
         c_name = white
         c_status = cyan
@@ -1658,78 +1555,70 @@ class Chinchiro(commands.Cog):
             c_frame = pink
             c_status = pink
 
-        # ステータス強調
         if "リーチ" in status: c_status = bg_red
         elif "神" in status: c_status = yellow
         
-        # ログ
         log_txt = green(f"▶ {log_msg}") if log_msg else blue("▶ ...")
-
-        # サイコロ行の生成
-        dice_rows = self.get_mid_dice_art(dice_list)
-        d_row1 = dice_rows[0].center(28)
-        d_row2 = dice_rows[1].center(28)
-        d_row3 = dice_rows[2].center(28)
-
-        # UI構築 (幅30文字目安)
+        dice_row = self.get_cyber_dice_string(dice_list)
+        
+        # 画面のデザインを組み立てます（スマホで見ても崩れない幅）
         hud = (
             f"```ansi\n"
-            f"{c_frame('╔══════════════════════════════╗')}\n"
-            f"{c_frame('║')} {c_name(player_name.center(28))} {c_frame('║')}\n"
-            f"{c_frame('╠══════════════════════════════╣')}\n"
-            f"{c_frame('║')} {d_row1} {c_frame('║')}\n"
-            f"{c_frame('║')} {d_row2} {c_frame('║')}\n"
-            f"{c_frame('║')} {d_row3} {c_frame('║')}\n"
-            f"{c_frame('╠══════════════════════════════╣')}\n"
-            f"{c_frame('║')} {c_status(status.center(28))} {c_frame('║')}\n"
-            f"{c_frame('║')} {log_txt.ljust(37)} {c_frame('║')}\n"
-            f"{c_frame('╚══════════════════════════════╝')}\n"
+            f"{c_frame('┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓')}\n"
+            f"{c_frame('┃')} {c_name(player_name.center(26))} {c_frame('┃')}\n"
+            f"{c_frame('┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫')}\n"
+            f"{c_frame('┃')}                          {c_frame('┃')}\n"
+            f"{c_frame('┃')} {dice_row.center(26)} {c_frame('┃')}\n"
+            f"{c_frame('┃')}                          {c_frame('┃')}\n"
+            f"{c_frame('┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫')}\n"
+            f"{c_frame('┃')} {c_status(status.center(26))} {c_frame('┃')}\n"
+            f"{c_frame('┃')} {log_txt.ljust(35)} {c_frame('┃')}\n"
+            f"{c_frame('┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛')}\n"
             f"```"
         )
         return hud
 
-    # ★ アニメーション
+    # サイコロが回るアニメーション処理
     async def play_animation(self, msg, embed, field_idx, player_name, final_dice, rank_text, score, is_super, mood="normal"):
         try:
-            # 1. 回転 (ランダムパラパラ)
+            # 1. 回転演出（パラパラ漫画みたいに更新）
             for _ in range(2):
                 rand_dice = [random.randint(1,6) for _ in range(3)]
                 mood_col = "blue"
                 if mood == "fever": mood_col = "pink"
                 
-                hud = self.render_hud(player_name, rand_dice, "SPINNING...", mood_col, log_msg="回転中...")
+                hud = self.render_hud(player_name, rand_dice, "回転中...", mood_col, log_msg="回転中...")
                 embed.set_field_at(field_idx, name=f"🎲 {player_name} のターン", value=hud, inline=False)
                 await msg.edit(embed=embed)
                 await asyncio.sleep(0.6)
 
-            # 2. 第1停止
+            # 2. 第1停止（1つ目が止まる）
             d1 = final_dice[0]
             temp_dice = [d1, random.randint(1,6), random.randint(1,6)]
             
-            hud = self.render_hud(player_name, temp_dice, "SPINNING...", "blue", log_msg="第一停止!")
+            hud = self.render_hud(player_name, temp_dice, "回転中...", "blue", log_msg="第一停止!")
             embed.set_field_at(field_idx, name=f"🎲 {player_name} のターン", value=hud, inline=False)
             await msg.edit(embed=embed)
             await asyncio.sleep(0.5)
 
-            # 3. 第2停止 & リーチ
+            # 3. 第2停止 & リーチ判定
             is_reach = False
-            # ソート済みの目を使ってリーチ目を演出
-            d2 = final_dice[1]
-            if d1 == d2: # 左・中テンパイ
-                disp_dice = [d1, d2, random.randint(1,6)]
+            # リーチ目（2つ揃い）を作る演出
+            if final_dice[0] == final_dice[1]:
+                disp_dice = [d1, final_dice[1], random.randint(1,6)]
                 is_reach = True
-            elif final_dice[1] == final_dice[2]: # 中・右テンパイ (見た目上は左回転にする)
+            elif final_dice[1] == final_dice[2]:
                 disp_dice = [random.randint(1,6), final_dice[1], final_dice[2]]
                 is_reach = True
-            elif final_dice[0] == final_dice[2]: # 左・右テンパイ
+            elif final_dice[0] == final_dice[2]:
                 disp_dice = [d1, random.randint(1,6), final_dice[2]]
                 is_reach = True
             else:
-                disp_dice = [d1, d2, random.randint(1,6)]
+                disp_dice = [d1, final_dice[1], random.randint(1,6)]
 
             if is_reach or score >= 90:
-                # 激アツ演出
-                hud = self.render_hud(player_name, disp_dice, "!!! リーチ !!!", "red", log_msg="勝負の行方は...!?")
+                # リーチ！赤く光らせる
+                hud = self.render_hud(player_name, disp_dice, "!!! リーチ !!!", "red", log_msg="チャンス到来!")
                 original_color = embed.color
                 embed.color = 0xff0000
                 embed.set_field_at(field_idx, name=f"⚠️ {player_name} チャンス！ ⚠️", value=hud, inline=False)
@@ -1737,7 +1626,7 @@ class Chinchiro(commands.Cog):
                 await asyncio.sleep(1.5)
 
                 if score >= 90 or is_super:
-                     # 確定級カットイン
+                    # 激アツなら金色に！
                     cutin_hud = self.render_hud(player_name, disp_dice, "✨ 運 命 の 一 撃 ✨", "gold", log_msg="激 熱 到 来")
                     embed.set_field_at(field_idx, name=f"🔥 {player_name} 激アツ！！ 🔥", value=cutin_hud, inline=False)
                     embed.color = 0xffd700
@@ -1745,15 +1634,14 @@ class Chinchiro(commands.Cog):
                     await asyncio.sleep(1.2)
                 
                 embed.color = original_color
-
             else:
-                # 通常
-                hud = self.render_hud(player_name, disp_dice, "SPINNING...", "blue", log_msg="第二停止...")
+                # 普通なら青色のまま
+                hud = self.render_hud(player_name, disp_dice, "回転中...", "blue", log_msg="第二停止...")
                 embed.set_field_at(field_idx, name=f"🎲 {player_name} のターン", value=hud, inline=False)
                 await msg.edit(embed=embed)
                 await asyncio.sleep(0.4)
 
-            # 4. 全停止
+            # 4. 全停止（結果確定）
             res_color = "blue"
             if is_super: res_color = "gold"
             elif score >= 90: res_color = "red"
@@ -1766,19 +1654,20 @@ class Chinchiro(commands.Cog):
 
         except Exception as e:
             traceback.print_exc()
-            # エラー時フォールバック
+            # エラーが出ても止まらないように、最低限の表示をする
             fb_hud = self.render_hud(player_name, final_dice, rank_text)
             embed.set_field_at(field_idx, name=f"🏁 {player_name}", value=fb_hud, inline=False)
             await msg.edit(embed=embed)
 
     async def check_balance(self, user, amount):
+        """所持金が足りているかチェックする機能"""
         async with self.bot.get_db() as db:
             async with db.execute("SELECT balance FROM accounts WHERE user_id = ?", (user.id,)) as c:
                 row = await c.fetchone()
                 return row and row['balance'] >= amount
 
-    # ================= PVE: 対ルメン =================
-    @app_commands.command(name="チンチロ", description="ルメンちゃんと勝負。ネオンカジノ仕様。")
+    # ================= PVE: ルメンちゃんと勝負 =================
+    @app_commands.command(name="チンチロ", description="ルメンちゃんと勝負。")
     async def chinchiro(self, interaction: discord.Interaction, bet: int):
         if bet < 500: return await interaction.response.send_message("500Ru以上から。", ephemeral=True)
         if not await self.check_balance(interaction.user, bet):
@@ -1797,7 +1686,7 @@ class Chinchiro(commands.Cog):
                     row = await c.fetchone()
                     user_bal = row['balance'] if row else 0
 
-            # 機嫌セリフ (グリッチあり)
+            # ルメンちゃんのセリフ分岐
             desc = "「さあ、あんたのRuを根こそぎ奪ってあげるわ。」"
             color = 0x2f3136
             mood_mode = "normal"
@@ -1819,16 +1708,16 @@ class Chinchiro(commands.Cog):
                 desc = "「…あんた、そんなに負けて楽しいの？\n特別に…私の『蜜』、たっぷり味あわせてあげる…♡」"
                 color = 0xff69b4
 
-            embed = discord.Embed(title="🍵 エリュシオン・ネオン賭博", description=desc, color=color)
+            embed = discord.Embed(title="🍵 エリュシオン・絶対遵守賭博", description=desc, color=color)
             
-            # 初期HUD
-            init_dice = [random.randint(1,6) for _ in range(3)]
+            # 初期表示
+            init_dice = ["?", "?", "?"]
             init_hud = self.render_hud("ルメン", init_dice, "待機中...")
             embed.add_field(name="親：ルメン", value=init_hud, inline=False)
             embed.add_field(name=f"子：{user.display_name}", value="準備中...", inline=False)
             msg = await interaction.followup.send(embed=embed)
 
-            # 1. 親
+            # 1. 親（ルメン）のターン
             p_dice, p_score, p_name, p_mult, p_super = [], 0, "", 0, False
             for i in range(1, 4):
                 p_dice, p_score, p_name, p_mult, p_rank, p_super = self.get_roll_result()
@@ -1839,11 +1728,11 @@ class Chinchiro(commands.Cog):
             if p_score >= 90 or p_score == 111:
                 return await self.settle_pve(msg, embed, user, bet, -10 if p_score == 111 else -2, "LUMEN_INSTANT")
 
-            # 2. 子
+            # 2. 子（プレイヤー）のターン
             u_res = await self.run_player_turn(msg, embed, 1, user, p_score, mood_mode)
             u_score, u_mult, u_super = u_res["score"], u_res["mult"], u_res["is_super"]
 
-            # 3. 判定
+            # 3. 勝敗判定
             res_mult = -1
             special = None
             if u_score == 111: res_mult = 10; special = "PLAYER_CRUSH"
@@ -1857,18 +1746,59 @@ class Chinchiro(commands.Cog):
             traceback.print_exc()
             await interaction.followup.send(f"⚠️ エラー発生: `{e}`", ephemeral=True)
 
-    # プレイヤーのターン
+    # ================= PVP: プレイヤー対戦 =================
+    @app_commands.command(name="チンチロ対戦", description="【PVP】1vs1の心理戦。挑戦者(親)が有利です。")
+    async def pvp_chinchiro(self, interaction: discord.Interaction, opponent: discord.Member, bet: int):
+        if opponent.bot or opponent == interaction.user: return await interaction.response.send_message("友達いないの？w", ephemeral=True)
+        if bet < 1000: return await interaction.response.send_message("対戦は1,000Ruから。", ephemeral=True)
+        if not await self.check_balance(interaction.user, bet) or not await self.check_balance(opponent, bet):
+            return await interaction.response.send_message("資金不足。", ephemeral=True)
+
+        view = ChinchiroPVPApplyView(self, interaction.user, opponent, bet)
+        msg = await interaction.response.send_message(f"{opponent.mention}！\n{interaction.user.mention} から **{bet:,} Ru** の果たし状よ！", view=view)
+        view.message = await interaction.original_response()
+
+    async def start_pvp_game(self, interaction, challenger, opponent, bet):
+        embed = discord.Embed(title="⚔️ PVP CHINCHIRO", color=0xff0000)
+        
+        # 画面の初期化
+        init_dice = ["?", "?", "?"]
+        hud_1p = self.render_hud(challenger.display_name, init_dice, "待機中...", "blue")
+        hud_2p = self.render_hud(opponent.display_name, init_dice, "待機中...", "blue")
+        
+        embed.add_field(name=f"1P(親): {challenger.display_name}", value=hud_1p, inline=False)
+        embed.add_field(name=f"2P(子): {opponent.display_name}", value=hud_2p, inline=False)
+        
+        msg = interaction.message 
+        await msg.edit(content=None, embed=embed, view=None)
+
+        try:
+            # 1. 先攻 (挑戦者＝親)
+            c_res = await self.run_player_turn(msg, embed, 0, challenger)
+            # 2. 後攻 (受けた側＝子)
+            o_res = await self.run_player_turn(msg, embed, 1, opponent)
+            # 3. 決着
+            await self.settle_pvp(msg, embed, challenger, opponent, bet, c_res, o_res)
+        except Exception as e:
+            traceback.print_exc()
+            await msg.channel.send("エラーで中断しました。")
+
+    # プレイヤーのターン処理 (PVE/PVP共通)
     async def run_player_turn(self, msg, embed, field_idx, player, p_score=None, mood="normal"):
         best_dice, best_score, best_name, best_mult, best_super = [], -999, "役なし", 0, False
         
         for try_num in range(1, 4):
+            # 抽選
             dice, score, name, mult, rank, is_super = self.get_roll_result()
+            # アニメーション
             await self.play_animation(msg, embed, field_idx, player.display_name, dice, name, score, is_super, mood)
 
+            # 強制確定条件
             if score >= 90 or score == -1 or try_num == 3:
                 best_dice, best_score, best_name, best_mult, best_super = dice, score, name, mult, is_super
                 break
             
+            # 選択ボタン表示
             view = ChinchiroTurnView(player, try_num)
             await msg.edit(view=view)
             await view.wait()
@@ -1883,16 +1813,16 @@ class Chinchiro(commands.Cog):
                 best_dice, best_score, best_name, best_mult, best_super = dice, score, name, mult, is_super
                 await msg.edit(view=None)
                 break
-
+        
         return {"dice": best_dice, "score": best_score, "name": best_name, "mult": best_mult, "is_super": best_super}
 
-    # 決済
+    # PVE用の決済処理 (ルメン戦)
     async def settle_pve(self, msg, embed, user, bet, multiplier, special=None):
         tax_rate = 0.10
         async with self.bot.get_db() as db:
             if multiplier > 0: # 勝ち
                 raw_win = bet * multiplier
-                # ダブルアップ
+                # ダブルアップチャンス
                 view = DoubleUpView(user)
                 embed.add_field(name="😈 悪魔の囁き", value=f"「勝ったのね？\n**倍プッシュ(x2)**する？\n確率は50%。勝てば **{raw_win*2:,} Ru**。負ければゼロよ。」", inline=False)
                 await msg.edit(embed=embed, view=view)
@@ -1905,7 +1835,7 @@ class Chinchiro(commands.Cog):
                         embed.color = 0xffd700
                     else:
                         raw_win = 0
-                        embed.set_field_at(2, name="😈 結果", value="**失 敗 ...**\n「あはは！欲張るからよ！ざまぁw」", inline=False)
+                      embed.set_field_at(2, name="😈 結果", value="**失 敗 ...**\n「あはは！欲張るからよ！ざまぁw」", inline=False)
                         embed.color = 0xff0000
                 else:
                     embed.set_field_at(2, name="😈 結果", value="「チッ、逃げたか。」", inline=False)
@@ -1948,137 +1878,92 @@ class Chinchiro(commands.Cog):
         embed.add_field(name="最終結果", value=res_text, inline=False)
         await msg.edit(embed=embed, view=None)
 
-    # ================= PVP: 対人戦 (ネオン仕様) =================
-    @app_commands.command(name="チンチロ対戦", description="【PVP】1vs1の心理戦。手数料10%")
-    async def pvp_chinchiro(self, interaction: discord.Interaction, opponent: discord.Member, bet: int):
-        if opponent.bot or opponent == interaction.user: return await interaction.response.send_message("友達いないの？w", ephemeral=True)
-        if bet < 1000: return await interaction.response.send_message("対戦は1,000Ruから。", ephemeral=True)
-        if not await self.check_balance(interaction.user, bet) or not await self.check_balance(opponent, bet):
-            return await interaction.response.send_message("どちらかの資金が足りません。", ephemeral=True)
-
-        view = ChinchiroPVPApplyView(self, interaction.user, opponent, bet)
-        msg = await interaction.response.send_message(f"{opponent.mention}！\n{interaction.user.mention} から **{bet:,} Ru** の果たし状よ！", view=view)
-        view.message = await interaction.original_response()
-
-    async def start_pvp_game(self, interaction, challenger, opponent, bet):
-        # ネオン風タイトル
-        embed = discord.Embed(title="⚔️ エリュシオン・決闘裁判", color=0xff0000)
-        
-        # 初期HUD (ハテナマークのサイコロを表示)
-        init_dice = ["?", "?", "?"]
-        hud_1p = self.render_hud(challenger.display_name, init_dice, "待機中...", "blue")
-        hud_2p = self.render_hud(opponent.display_name, init_dice, "待機中...", "blue")
-        
-        embed.add_field(name=f"先攻：{challenger.display_name}", value=hud_1p, inline=False)
-        embed.add_field(name=f"後攻：{opponent.display_name}", value=hud_2p, inline=False)
-        
-        msg = interaction.message 
-        await msg.edit(content=None, embed=embed, view=None)
-
-        try:
-            # 1. 先攻
-            c_res = await self.run_player_turn(msg, embed, 0, challenger)
-            # 2. 後攻
-            o_res = await self.run_player_turn(msg, embed, 1, opponent)
-            # 3. 決着
-            await self.settle_pvp(msg, embed, challenger, opponent, bet, c_res, o_res)
-        except Exception as e:
-            traceback.print_exc()
-            await msg.channel.send(f"⚠️ エラーで中断しました: `{e}`")
-
-    # ★ プレイヤーのターン処理 (PVEと共通だが、PVP用に再確認)
-    async def run_player_turn(self, msg, embed, field_idx, player, p_score=None, mood="normal"):
-        best_dice, best_score, best_name, best_mult, best_super = [], -999, "役なし", 0, False
-        
-        for try_num in range(1, 4):
-            # 抽選
-            dice, score, name, mult, rank, is_super = self.get_roll_result()
-            
-            # アニメーション再生 (PVPでも共通のアニメを使う)
-            await self.play_animation(msg, embed, field_idx, player.display_name, dice, name, score, is_super, mood)
-
-            # 強制確定
-            if score >= 90 or score == -1 or try_num == 3:
-                best_dice, best_score, best_name, best_mult, best_super = dice, score, name, mult, is_super
-                break
-            
-            # PVP用View
-            view = ChinchiroTurnView(player, try_num)
-            await msg.edit(view=view)
-            await view.wait()
-            
-            if view.action == "confirm":
-                best_dice, best_score, best_name, best_mult, best_super = dice, score, name, mult, is_super
-                await msg.edit(view=None)
-                break
-            elif view.action == "retry":
-                continue 
-            else: 
-                best_dice, best_score, best_name, best_mult, best_super = dice, score, name, mult, is_super
-                await msg.edit(view=None)
-                break
-        
-        # 結果を返す
-        return {"dice": best_dice, "score": best_score, "name": best_name, "mult": best_mult, "is_super": best_super}
-
-    # ★ PVP決済 (デザイン対応版)
+    # ★ PVP用の決済処理 (派手な演出追加！)
     async def settle_pvp(self, msg, embed, p1, p2, bet, r1, r2):
         winner = None
-        s1, s2 = r1["score"], r2["score"]
+        # スコアを取得
+        s1 = r1["score"]
+        s2 = r2["score"]
         
-        # 勝敗ロジック
-        if s1 == 111 and s2 == 111: winner = None
-        elif s1 == 111: winner = p1
-        elif s2 == 111: winner = p2
-        elif s1 == -1 and s2 == -1: winner = None
-        elif s1 == -1: winner = p2
-        elif s2 == -1: winner = p1
-        elif s1 > s2: winner = p1
-        elif s2 > s1: winner = p2
+        # ★ ここが変更点：親（挑戦者 p1）有利ルール
+        # 親のスコアが子以上なら親の勝ち (s1 >= s2)
+        if s1 >= s2:
+            winner = p1
+            loser = p2
+            w_res = r1 # 勝者の結果
+        else:
+            winner = p2
+            loser = p1
+            w_res = r2
+        
+        # 特殊役 (ヒフミなど) の処理を簡易的に統合
+        # もし両方ヒフミ(-1)なら、s1 >= s2 (-1 >= -1) なので親勝ちになる
+        # もし両方ピンゾロ(111)なら、親勝ちになる
         
         async with self.bot.get_db() as db:
             if winner:
-                loser = p2 if winner == p1 else p1
                 move_amount = bet
-                # ピンゾロ勝利なら10倍没収
-                w_res = r1 if winner == p1 else r2
+                # ピンゾロで勝ったら10倍取り！
                 if w_res["score"] == 111: move_amount = bet * 10
                 
+                # 負けた人の残高確認
                 async with db.execute("SELECT balance FROM accounts WHERE user_id = ?", (loser.id,)) as c:
                     loser_bal = (await c.fetchone())['balance']
-                    actual_move = min(move_amount, loser_bal)
+                    actual_move = min(move_amount, loser_bal) # 全財産以上は取れない
 
                 tax = int(actual_move * 0.10)
                 prize = actual_move - tax
 
-                # 移動処理
+                # お金の移動
                 await db.execute("UPDATE accounts SET balance = balance - ? WHERE user_id = ?", (actual_move, loser.id))
                 await db.execute("UPDATE accounts SET balance = balance + ? WHERE user_id = ?", (prize, winner.id))
                 await db.execute("UPDATE accounts SET balance = balance + ? WHERE user_id = 0", (tax,))
                 
-                res_title = f"🏆 勝者: {winner.display_name}！"
-                res_desc = f"**{actual_move:,} Ru** を奪い取りました！\n(手数料: {tax:,} Ru)"
-                embed.color = 0xffd700 # Gold
+                # ★ 派手な勝利演出！
+                win_amount_str = f"{actual_move:,}"
+                
+                # 黄色い枠で囲ったド派手なメッセージを作ります
+                result_hud = (
+                    f"```ansi\n"
+                    f"{yellow('┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓')}\n"
+                    f"{yellow('┃')}   👑   {white('WINNER')}   👑    {yellow('┃')}\n"
+                    f"{yellow('┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫')}\n"
+                    f"{yellow('┃')}   {cyan(winner.display_name.center(26))}   {yellow('┃')}\n"
+                    f"{yellow('┃')}   {green('+' + win_amount_str.center(18) + ' Ru')}   {yellow('┃')}\n"
+                    f"{yellow('┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛')}\n"
+                    f"```"
+                )
+                
+                res_desc = result_hud + f"\n(手数料: {tax:,} Ru)"
+                embed.color = 0xffd700 # ゴールド色
             else:
+                # 引き分け（ここには来ないはずですが念のため）
                 res_title = "🤝 引き分け"
-                res_desc = "賭け金は返還されます。"
-                embed.color = 0x808080 # Gray
+                res_desc = "返金されます。"
+                embed.color = 0x808080
             
             await db.commit()
 
-        embed.title = res_title
+        embed.title = "🏆 決 着 🏆"
         embed.description = res_desc
         embed.clear_fields()
         
-        # --- 最終結果のHUD描画 ---
-        # 勝者はGold、敗者はBlue(Normal)で表示
-        c1 = "blue"
-        c2 = "blue"
+        # 最終的な出目を表示
+        # 勝者は金色、敗者は青色で表示
+        c1 = "gold" if winner == p1 else "blue"
+        c2 = "gold" if winner == p2 else "blue"
         
-        if winner == p1: c1 = "gold"
-        elif winner == p2: c2 = "gold"
+        d1 = r1.get('dice', ['?', '?', '?'])
+        d2 = r2.get('dice', ['?', '?', '?'])
         
-        # 安全にdiceを取得（もしエラー等で取れていなければ?
+        h1 = self.render_hud(p1.display_name, d1, r1['name'], c1)
+        h2 = self.render_hud(p2.display_name, d2, r2['name'], c2)
+        
+        embed.add_field(name=f"1P(親): {p1.display_name}", value=h1, inline=True)
+        embed.add_field(name=f"2P(子): {p2.display_name}", value=h2, inline=True)
+        
+        await msg.edit(embed=embed, view=None)
+
 
 
 
