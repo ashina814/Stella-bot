@@ -1835,7 +1835,7 @@ class Chinchiro(commands.Cog):
                         embed.color = 0xffd700
                     else:
                         raw_win = 0
-                      embed.set_field_at(2, name="😈 結果", value="**失 敗 ...**\n「あはは！欲張るからよ！ざまぁw」", inline=False)
+                        embed.set_field_at(2, name="😈 結果", value="**失 敗 ...**\n「あはは！欲張るからよ！ざまぁw」", inline=False)
                         embed.color = 0xff0000
                 else:
                     embed.set_field_at(2, name="😈 結果", value="「チッ、逃げたか。」", inline=False)
