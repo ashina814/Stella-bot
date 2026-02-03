@@ -1956,50 +1956,25 @@ class Slot(commands.Cog):
             "MISS":    "💨"  # ハズレ
         }
         
-        # 設定ごとの確率テーブル (合計1000)
-        # weightの合計値を変えることで期待値を調整
+        # 設定ごとの確率テーブル
         self.MODES = {
-            "1": { # 設定1: 回収モード (RTP 約82%)
-                "probs": [
-                    ("DIAMOND", 1, 100), ("SEVEN", 3, 20), ("WILD", 10, 10),
-                    ("BELL", 50, 5), ("CHERRY", 100, 2), ("MISS", 836, 0)
-                ],
-                "name": "設定1 (地獄)"
-            },
-            "4": { # 設定4: 通常モード (RTP 約90%)
-                "probs": [
-                    ("DIAMOND", 1, 100), ("SEVEN", 4, 20), ("WILD", 15, 10),
-                    ("BELL", 65, 5), ("CHERRY", 120, 2), ("MISS", 795, 0)
-                ],
-                "name": "設定4 (通常)"
-            },
-            "6": { # 設定6: 天国モード (RTP 約98%)
-                "probs": [
-                    ("DIAMOND", 2, 100), ("SEVEN", 6, 20), ("WILD", 25, 10),
-                    ("BELL", 80, 5), ("CHERRY", 130, 2), ("MISS", 757, 0)
-                ],
-                "name": "設定6 (激甘)"
-            },
-            "GOD": { # 隠し設定: 100%越え (RTP 約115%)
-                "probs": [
-                    ("DIAMOND", 5, 100), ("SEVEN", 15, 20), ("WILD", 40, 10),
-                    ("BELL", 100, 5), ("CHERRY", 150, 2), ("MISS", 690, 0)
-                ],
-                "name": "設定L (GOD)"
-            }
+            "1": { "probs": [("DIAMOND", 1, 100), ("SEVEN", 3, 20), ("WILD", 10, 10), ("BELL", 50, 5), ("CHERRY", 100, 2), ("MISS", 836, 0)], "name": "設定1 (地獄)" },
+            "4": { "probs": [("DIAMOND", 1, 100), ("SEVEN", 4, 20), ("WILD", 15, 10), ("BELL", 65, 5), ("CHERRY", 120, 2), ("MISS", 795, 0)], "name": "設定4 (通常)" },
+            "6": { "probs": [("DIAMOND", 2, 100), ("SEVEN", 6, 20), ("WILD", 25, 10), ("BELL", 80, 5), ("CHERRY", 130, 2), ("MISS", 757, 0)], "name": "設定6 (激甘)" },
+            "GOD": { "probs": [("DIAMOND", 5, 100), ("SEVEN", 15, 20), ("WILD", 40, 10), ("BELL", 100, 5), ("CHERRY", 150, 2), ("MISS", 690, 0)], "name": "設定L (GOD)" }
         }
 
     async def get_current_mode(self):
-        """DBから現在の設定を取得"""
-        mode = "4" # デフォルト設定4
-        async with self.bot.get_db() as db:
-            async with db.execute("SELECT value FROM server_config WHERE key = 'slot_mode'") as cursor:
-                row = await cursor.fetchone()
-                if row: mode = row['value']
+        mode = "4" 
+        try:
+            async with self.bot.get_db() as db:
+                async with db.execute("SELECT value FROM server_config WHERE key = 'slot_mode'") as cursor:
+                    row = await cursor.fetchone()
+                    if row: mode = row['value']
+        except: pass
         return mode
 
     def determine_outcome(self, mode_key):
-        """設定に基づいて結果を決定"""
         probs = self.MODES.get(mode_key, self.MODES["4"])["probs"]
         rand = random.randint(1, 1000)
         current = 0
@@ -2010,27 +1985,21 @@ class Slot(commands.Cog):
         return "MISS", 0
 
     def generate_grid(self, outcome_name, force_reach=False):
-        """グリッド生成。force_reach=Trueなら必ずリーチ目ハズレを作る"""
         grid = [[self.SYMBOLS["MISS"] for _ in range(3)] for _ in range(3)]
         deco_symbols = [v for k, v in self.SYMBOLS.items() if k != "DIAMOND"]
 
-        # ランダム埋め
         for r in range(3):
             for c in range(3):
                 grid[r][c] = random.choice(deco_symbols)
 
         if outcome_name != "MISS":
-            # 当たり: 中央揃え
             sym = self.SYMBOLS[outcome_name]
             grid[1] = [sym, sym, sym]
         else:
-            # ハズレ
-            if force_reach or random.random() < 0.2: # 20%で自然リーチ
-                # リーチ目作成 (例: 7-7-💨)
+            if force_reach or random.random() < 0.2:
                 target = random.choice(list(self.SYMBOLS.values()))
                 grid[1] = [target, target, self.SYMBOLS["MISS"]]
             else:
-                # 完全バラバラ
                 grid[1][0] = random.choice(deco_symbols)
                 grid[1][1] = random.choice([s for s in deco_symbols if s != grid[1][0]])
                 grid[1][2] = random.choice(deco_symbols)
@@ -2038,28 +2007,30 @@ class Slot(commands.Cog):
 
     def format_grid(self, grid, highlight=False, flash_color=None):
         """
-        グリッド文字列化。
-        highlight: 当たりライン強調
-        flash_color: 全体をANSIカラーで光らせる (gold, red, etc)
+        グリッド文字列化（ズレ防止版）
+        内部の縦線(┃)を廃止し、スペースのみで調整することでズレを防ぎます
         """
-        # ANSIカラー定義
         colors = {
-            "gold": ("\u001b[1;33m", "\u001b[0m"), # 黄色太字
-            "red":  ("\u001b[1;31m", "\u001b[0m"), # 赤太字
-            "blue": ("\u001b[1;34m", "\u001b[0m"), # 青太字
+            "gold": ("\u001b[1;33m", "\u001b[0m"), 
+            "red":  ("\u001b[1;31m", "\u001b[0m"), 
+            "blue": ("\u001b[1;34m", "\u001b[0m"), 
         }
         pre, suf = colors.get(flash_color, ("", ""))
         
         rows = []
         for r in range(3):
-            line = f"┃ {' ┃ '.join(grid[r])} ┃"
+            # 内部の線をなくし、スペースで見やすく
+            content = "   ".join(grid[r])
+            line = f"┃  {content}  ┃"
             if r == 1 and highlight:
-                line = f"▶ {' ┃ '.join(grid[r])} ◀"
+                line = f"▶  {content}  ◀"
             rows.append(pre + line + suf)
         
-        sep = pre + "┣━━━╋━━━╋━━━┫" + suf
-        top = pre + "┏━━━┳━━━┳━━━┓" + suf
-        btm = pre + "┗━━━┻━━━┻━━━┛" + suf
+        # 枠線
+        sep = pre + "┣━━━━━━━━━━━━━━━┫" + suf
+        top = pre + "┏━━━━━━━━━━━━━━━┓" + suf
+        btm = pre + "┗━━━━━━━━━━━━━━━┛" + suf
+        
         return f"```ansi\n{top}\n{rows[0]}\n{sep}\n{rows[1]}\n{sep}\n{rows[2]}\n{btm}\n```"
 
     # --- 管理者用設定コマンド ---
@@ -2076,172 +2047,164 @@ class Slot(commands.Cog):
         async with self.bot.get_db() as db:
             await db.execute("INSERT OR REPLACE INTO server_config (key, value) VALUES ('slot_mode', ?)", (mode,))
             await db.commit()
-        
         mode_name = self.MODES[mode]["name"]
-        await interaction.response.send_message(f"✅ スロットの設定を **{mode_name}** に変更しました。\n※これ以降の回転から適用されます。", ephemeral=True)
+        await interaction.response.send_message(f"✅ スロットの設定を **{mode_name}** に変更しました。", ephemeral=True)
 
     # --- メインのスロットコマンド ---
     @app_commands.command(name="スロット", description="運命のレバーを叩け。")
     @app_commands.describe(bet="賭け金 (500 Ru 〜)")
     async def slot(self, interaction: discord.Interaction, bet: int):
         if bet < 500: return await interaction.response.send_message("500Ru以下？冷やかしなら帰って。", ephemeral=True)
-        await interaction.response.defer()
-        user = interaction.user
+        
+        try:
+            await interaction.response.defer()
+            user = interaction.user
 
-        # 1. 残高処理
-        async with self.bot.get_db() as db:
-            async with db.execute("SELECT balance FROM accounts WHERE user_id = ?", (user.id,)) as c:
-                row = await c.fetchone()
-                if not row or row['balance'] < bet:
-                    return await interaction.followup.send("お金ないじゃん。出直してきな♡")
+            # 1. 残高処理
+            async with self.bot.get_db() as db:
+                async with db.execute("SELECT balance FROM accounts WHERE user_id = ?", (user.id,)) as c:
+                    row = await c.fetchone()
+                    if not row or row['balance'] < bet:
+                        return await interaction.followup.send("お金ないじゃん。出直してきな♡")
+                
+                await db.execute("UPDATE accounts SET balance = balance - ? WHERE user_id = ?", (bet, user.id))
+                await db.execute("UPDATE accounts SET balance = balance + ? WHERE user_id = 0", (bet,))
+                await db.commit()
+
+            # 2. 結果決定
+            current_mode = await self.get_current_mode()
+            outcome_name, multiplier = self.determine_outcome(current_mode)
             
-            await db.execute("UPDATE accounts SET balance = balance - ? WHERE user_id = ?", (bet, user.id))
-            await db.execute("UPDATE accounts SET balance = balance + ? WHERE user_id = 0", (bet,))
-            await db.commit()
-
-        # 2. 結果決定
-        current_mode = await self.get_current_mode()
-        outcome_name, multiplier = self.determine_outcome(current_mode)
-        
-        # ★演出用ロジック: 「復活（滑り）」の判定
-        # もし当たりなら、そのまま当たりグリッドを作る
-        # もしハズレなら、たまに「リーチ目」にしてから「復活」させて当たりに変える演出を入れる
-        is_respin = False
-        respin_target = None
-        
-        if outcome_name == "MISS":
-            # ハズレ時、10%の確率で「嘘ハズレ（実は当たり）」に書き換える（設定が高いほど起きやすいとかも可）
-            # ここではシンプルに一律10%で「復活当選」
-            if random.random() < 0.10: 
-                is_respin = True
-                # 復活後の当たり役を決める（WILD以上の高配当が出やすいことにする）
-                respin_target = random.choice(["WILD", "SEVEN", "DIAMOND"])
-                multiplier = dict(self.MODES["4"]["probs"])[respin_target] # 倍率は通常設定参照
-                outcome_name = respin_target # 結果を上書き
-        
-        # グリッド生成
-        if is_respin:
-            # 復活演出用: 最初は「リーチ目ハズレ」を表示する必要がある
-            final_grid = self.generate_grid(outcome_name) # 最終形（当たり）
-            temp_miss_grid = self.generate_grid("MISS", force_reach=True) # 途中経過（リーチハズレ）
-            # temp_miss_gridの左と中は、最終的な当たり絵柄に合わせておく
-            sym = self.SYMBOLS[outcome_name]
-            temp_miss_grid[1][0] = sym
-            temp_miss_grid[1][1] = sym
-            # 右だけハズレ
-            temp_miss_grid[1][2] = self.SYMBOLS["MISS"]
-        else:
-            final_grid = self.generate_grid(outcome_name)
-            temp_miss_grid = None
-
-        # Embed作成
-        embed = discord.Embed(title="🎰 エリュシオン・ドリームスロット", color=0x2f3136)
-        embed.add_field(name="BET", value=f"**{bet:,} Ru**")
-        embed.add_field(name="STATUS", value="Spinning...")
-        msg = await interaction.followup.send(embed=embed)
-
-        # 3. 回転演出
-        await asyncio.sleep(0.8)
-        # 第1停止
-        disp_grid = [row[:] for row in (temp_miss_grid if is_respin else final_grid)]
-        # まだ隠す
-        disp_grid[0][1], disp_grid[1][1], disp_grid[2][1] = "🌀", "🌀", "🌀"
-        disp_grid[0][2], disp_grid[1][2], disp_grid[2][2] = "🌀", "🌀", "🌀"
-        
-        embed.description = self.format_grid(disp_grid)
-        await msg.edit(embed=embed)
-
-        # 第2停止
-        await asyncio.sleep(1.0)
-        disp_grid[0][1], disp_grid[1][1], disp_grid[2][1] = \
-            (temp_miss_grid if is_respin else final_grid)[0][1], \
-            (temp_miss_grid if is_respin else final_grid)[1][1], \
-            (temp_miss_grid if is_respin else final_grid)[2][1]
-        
-        embed.description = self.format_grid(disp_grid)
-        await msg.edit(embed=embed)
-
-        # リーチ判定
-        is_reach = (disp_grid[1][0] == disp_grid[1][1])
-        if is_reach:
-            embed.color = 0xffff00
-            embed.add_field(name="🔥 チャンス！", value="リーチ！来るか…！？", inline=False)
-            await msg.edit(embed=embed)
-            await asyncio.sleep(1.5)
-
-        # 第3停止
-        await asyncio.sleep(1.0)
-        
-        if is_respin:
-            # 一旦ハズレ目を出す
-            embed.description = self.format_grid(temp_miss_grid)
-            embed.color = 0x2f3136
-            embed.clear_fields()
-            embed.add_field(name="RESULT", value="...", inline=False)
-            await msg.edit(embed=embed)
+            # 復活演出（滑り）
+            is_respin = False
+            respin_target = None
+            if outcome_name == "MISS":
+                if random.random() < 0.10: 
+                    is_respin = True
+                    respin_target = random.choice(["WILD", "SEVEN", "DIAMOND"])
+                    
+                    # ★修正箇所：3要素タプルから辞書を作るバグを修正
+                    probs = self.MODES.get(current_mode, self.MODES["4"])["probs"]
+                    # 名前(index 0)と倍率(index 2)だけの辞書を作成
+                    payout_map = {p[0]: p[2] for p in probs}
+                    
+                    multiplier = payout_map.get(respin_target, 0)
+                    outcome_name = respin_target
             
-            # タメる
+            # グリッド生成
+            if is_respin:
+                final_grid = self.generate_grid(outcome_name)
+                temp_miss_grid = self.generate_grid("MISS", force_reach=True)
+                sym = self.SYMBOLS[outcome_name]
+                temp_miss_grid[1][0] = sym
+                temp_miss_grid[1][1] = sym
+                temp_miss_grid[1][2] = self.SYMBOLS["MISS"]
+            else:
+                final_grid = self.generate_grid(outcome_name)
+                temp_miss_grid = None
+
+            # 3. アニメーション
+            embed = discord.Embed(title="🎰 エリュシオン・ドリームスロット", color=0x2f3136)
+            embed.add_field(name="BET", value=f"**{bet:,} Ru**")
+            embed.add_field(name="STATUS", value="Spinning...")
+            msg = await interaction.followup.send(embed=embed)
+
+            await asyncio.sleep(0.8) # ウェイト調整
+            
+            # 第1停止
+            disp_grid = [row[:] for row in (temp_miss_grid if is_respin else final_grid)]
+            disp_grid[0][1], disp_grid[1][1], disp_grid[2][1] = "🌀", "🌀", "🌀"
+            disp_grid[0][2], disp_grid[1][2], disp_grid[2][2] = "🌀", "🌀", "🌀"
+            embed.description = self.format_grid(disp_grid)
+            await msg.edit(embed=embed)
+
+            # 第2停止
+            await asyncio.sleep(1.0)
+            disp_grid[0][1], disp_grid[1][1], disp_grid[2][1] = \
+                (temp_miss_grid if is_respin else final_grid)[0][1], \
+                (temp_miss_grid if is_respin else final_grid)[1][1], \
+                (temp_miss_grid if is_respin else final_grid)[2][1]
+            embed.description = self.format_grid(disp_grid)
+            await msg.edit(embed=embed)
+
+            # リーチ判定
+            is_reach = (disp_grid[1][0] == disp_grid[1][1])
+            if is_reach:
+                embed.color = 0xffff00
+                embed.add_field(name="🔥 チャンス！", value="リーチ！来るか…！？", inline=False)
+                await msg.edit(embed=embed)
+                await asyncio.sleep(1.5)
+
+            # 第3停止
             await asyncio.sleep(1.0)
             
-            # 復活演出！
-            embed.color = 0xff0000 # 赤く光る
-            embed.description = f"{self.format_grid(temp_miss_grid, flash_color='red')}\n\n🛑 **キュイン！滑り発生！！** 🛑"
-            await msg.edit(embed=embed)
-            await asyncio.sleep(1.5)
-            
-            # 最終的な当たり目を表示
-            final_display = final_grid
-        else:
-            final_display = final_grid
-
-        # 最終結果表示
-        # 777なら金色にする
-        flash = "gold" if outcome_name == "SEVEN" else None
-        if outcome_name == "DIAMOND": flash = "blue"
-        
-        embed.description = self.format_grid(final_display, highlight=(multiplier > 0), flash_color=flash)
-        
-        # 4. 精算処理
-        if multiplier > 0:
-            payout = bet * multiplier
-            async with self.bot.get_db() as db:
-                await db.execute("UPDATE accounts SET balance = balance + ? WHERE user_id = ?", (payout, user.id))
-                await db.commit()
-
-            if outcome_name == "DIAMOND":
-                comment = "💎 **JACKPOT!!** 💎\n「う、嘘…！？私の銀行からこんなに持っていくなんて…！身体で返してよ！！///」"
-                color = 0xffffff
-            elif outcome_name == "SEVEN":
-                comment = "7️⃣ **BIG WIN!!** 7️⃣\n「7が揃った…だと…！？ おめでとう！美しい輝きね！」"
-                color = 0xffd700
-            elif outcome_name == "WILD":
-                comment = "🃏 **SUPER WIN!** 🃏\n「あんた、持ってるわね…。ちょっと見直したかも。」"
-                color = 0xff00ff
+            if is_respin:
+                embed.description = self.format_grid(temp_miss_grid)
+                embed.color = 0x2f3136
+                embed.clear_fields()
+                embed.add_field(name="RESULT", value="...", inline=False)
+                await msg.edit(embed=embed)
+                
+                await asyncio.sleep(1.0)
+                # 復活！
+                embed.color = 0xff0000 
+                embed.description = f"{self.format_grid(temp_miss_grid, flash_color='red')}\n\n🛑 **キュイン！滑り発生！！** 🛑"
+                await msg.edit(embed=embed)
+                await asyncio.sleep(1.5)
+                final_display = final_grid
             else:
-                comment = "🎉 **WIN!**\n「ま、これくらいなら小遣いとしてあげるわ。」"
-                color = 0x00ff00
-            
-            embed.clear_fields()
-            embed.add_field(name="RESULT", value=f"**+{payout:,} Ru**", inline=False)
-            embed.color = color
-            
-        else:
-            charge = int(bet * 0.05)
-            async with self.bot.get_db() as db:
-                await db.execute("""
-                    INSERT INTO server_config (key, value) VALUES ('jackpot_pool', ?) 
-                    ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + ?
-                """, (charge, charge))
-                await db.commit()
-            
-            replies = ["養分乙♡", "日頃の行いが悪いんじゃない？", "銀行の肥やしが増えちゃった♡"]
-            comment = f"💀 **LOSE...**\n「{random.choice(replies)}」"
-            embed.color = 0x2f3136
-            embed.clear_fields()
-            embed.set_footer(text="負け額の一部はジャックポットに貯蓄されました")
+                final_display = final_grid
 
-        embed.description += f"\n\n{comment}"
-        await msg.edit(embed=embed)
+            # 4. 最終結果
+            flash = "gold" if outcome_name == "SEVEN" else None
+            if outcome_name == "DIAMOND": flash = "blue"
+            
+            embed.description = self.format_grid(final_display, highlight=(multiplier > 0), flash_color=flash)
+            
+            if multiplier > 0:
+                payout = bet * multiplier
+                async with self.bot.get_db() as db:
+                    await db.execute("UPDATE accounts SET balance = balance + ? WHERE user_id = ?", (payout, user.id))
+                    await db.commit()
+
+                if outcome_name == "DIAMOND":
+                    comment = "💎 **JACKPOT!!** 💎\n「う、嘘…！？私の銀行からこんなに持っていくなんて…！身体で返してよ！！///」"
+                    color = 0xffffff
+                elif outcome_name == "SEVEN":
+                    comment = "7️⃣ **BIG WIN!!** 7️⃣\n「7が揃った…だと…！？ おめでとう！美しい輝きね！」"
+                    color = 0xffd700
+                elif outcome_name == "WILD":
+                    comment = "🃏 **SUPER WIN!** 🃏\n「あんた、持ってるわね…。ちょっと見直したかも。」"
+                    color = 0xff00ff
+                else:
+                    comment = "🎉 **WIN!**\n「ま、これくらいなら小遣いとしてあげるわ。」"
+                    color = 0x00ff00
+                
+                embed.clear_fields()
+                embed.add_field(name="RESULT", value=f"**+{payout:,} Ru**", inline=False)
+                embed.color = color
+                
+            else:
+                charge = int(bet * 0.05)
+                async with self.bot.get_db() as db:
+                    await db.execute("""
+                        INSERT INTO server_config (key, value) VALUES ('jackpot_pool', ?) 
+                        ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + ?
+                    """, (charge, charge))
+                    await db.commit()
+                
+                replies = ["養分乙♡", "日頃の行いが悪いんじゃない？", "銀行の肥やしが増えちゃった♡"]
+                comment = f"💀 **LOSE...**\n「{random.choice(replies)}」"
+                embed.color = 0x2f3136
+                embed.clear_fields()
+                embed.set_footer(text="負け額の一部はジャックポットに貯蓄されました")
+
+            embed.description += f"\n\n{comment}"
+            await msg.edit(embed=embed)
+
+        except Exception as e:
+            traceback.print_exc()
+            await interaction.followup.send(f"❌ エラーが発生しました: `{e}`", ephemeral=True)
 
 
 
