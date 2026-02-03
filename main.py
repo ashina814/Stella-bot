@@ -18,6 +18,7 @@ import math
 import contextlib
 import os
 from typing import Optional, List, Dict
+from PIL import Image, ImageDraw, ImageFont
 from dotenv import load_dotenv
 from logging.handlers import RotatingFileHandler
 GEKIATSU = "<:b_069:1438962326463054008>"
@@ -447,96 +448,127 @@ class PrivateVCManager(commands.Cog):
         # 完了通知 (defer済みなので followup)
         await interaction.followup.send("✅ 設定を保存し、パネルを設置しました。", ephemeral=True)
 
-# --- 送金確認用のボタン ---
 class TransferConfirmView(discord.ui.View):
-    def __init__(self, bot, sender, receiver, amount):
+    def __init__(self, bot, sender, receiver, amount, message):
         super().__init__(timeout=60)
         self.bot = bot
         self.sender = sender
         self.receiver = receiver
         self.amount = amount
+        self.msg = message
         self.processed = False
 
-    @discord.ui.button(label="✅ 送金する", style=discord.ButtonStyle.green)
+    async def on_timeout(self):
+        # タイムアウト時にボタンを無効化
+        if not self.processed:
+            for child in self.children:
+                child.disabled = True
+            try:
+                await self.message.edit(content="⏰ 時間切れです。", view=self)
+            except:
+                pass
+
+    @discord.ui.button(label="✅ 送金を実行する", style=discord.ButtonStyle.green)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.processed: return
         self.processed = True
         
-        # ボタンを押した後の処理（ローディング表示）
-        await interaction.response.defer(ephemeral=True)
+        # 本人確認
+        if interaction.user.id != self.sender.id:
+            return await interaction.response.send_message("❌ 操作権限がありません。", ephemeral=True)
+
+        await interaction.response.defer()
         
+        month_tag = datetime.datetime.now().strftime("%Y-%m")
         sender_new_bal = 0
         receiver_new_bal = 0
-        month_tag = datetime.datetime.now().strftime("%Y-%m")
 
-        try:
-            async with self.bot.get_db() as db:
+        async with self.bot.get_db() as db:
+            # 1. 残高チェック
+            async with db.execute("SELECT balance FROM accounts WHERE user_id = ?", (self.sender.id,)) as c:
+                row = await c.fetchone()
+                if not row or row['balance'] < self.amount:
+                    return await interaction.followup.send("❌ 残高が不足しています。", ephemeral=True)
+
+            try:
+                # 2. 送金処理 (Atomic)
+                # 送り主から引く
+                await db.execute("UPDATE accounts SET balance = balance - ? WHERE user_id = ?", (self.amount, self.sender.id))
+                
+                # 受取人に足す（なければ作成）
+                await db.execute("""
+                    INSERT INTO accounts (user_id, balance, total_earned) VALUES (?, ?, 0)
+                    ON CONFLICT(user_id) DO UPDATE SET balance = balance + excluded.balance
+                """, (self.receiver.id, self.amount))
+                
+                # 履歴保存
+                await db.execute("""
+                    INSERT INTO transactions (sender_id, receiver_id, amount, type, description, month_tag)
+                    VALUES (?, ?, ?, 'TRANSFER', ?, ?)
+                """, (self.sender.id, self.receiver.id, self.amount, self.msg, month_tag))
+                
+                # ログ用に最新残高を取得
+                async with db.execute("SELECT balance FROM accounts WHERE user_id = ?", (self.sender.id,)) as c:
+                    sender_new_bal = (await c.fetchone())['balance']
+                async with db.execute("SELECT balance FROM accounts WHERE user_id = ?", (self.receiver.id,)) as c:
+                    receiver_new_bal = (await c.fetchone())['balance']
+
+                await db.commit()
+                
+                # 3. 完了画面更新（ボタンを消す）
+                self.stop()
+                await interaction.edit_original_response(content=f"✅ {self.receiver.mention} へ {self.amount:,} Ru 送金しました。", embed=None, view=None)
+
+                # 4. 【追加】受取人へのDM通知機能（下のコードから移植）
                 try:
-                    # 1. 残高を減らす
-                    await db.execute("INSERT OR IGNORE INTO accounts (user_id, balance) VALUES (?, 0)", (self.sender.id,))
-                    cursor = await db.execute(
-                        "UPDATE accounts SET balance = balance - ? WHERE user_id = ? AND balance >= ?", 
-                        (self.amount, self.sender.id, self.amount)
-                    )
+                    notify = True
+                    async with db.execute("SELECT dm_salary_enabled FROM user_settings WHERE user_id = ?", (self.receiver.id,)) as c:
+                        res = await c.fetchone()
+                        # 設定があり、かつ0(OFF)なら送らない
+                        if res and res['dm_salary_enabled'] == 0: notify = False
                     
-                    if cursor.rowcount == 0:
-                        return await interaction.followup.send(f"❌ 残高が足りません。", ephemeral=True)
+                    if notify:
+                        embed = discord.Embed(title="💰 Ru_men受取通知", color=discord.Color.green())
+                        embed.add_field(name="送金者", value=self.sender.mention, inline=False)
+                        embed.add_field(name="受取額", value=f"**{self.amount:,} Ru**", inline=False)
+                        embed.add_field(name="メッセージ", value=f"`{self.msg}`", inline=False)
+                        embed.timestamp = datetime.datetime.now()
+                        await self.receiver.send(embed=embed)
+                except:
+                    pass # DM拒否などで送れなくてもエラーにしない
 
-                    # 2. 残高を増やす
-                    await db.execute("INSERT OR IGNORE INTO accounts (user_id, balance) VALUES (?, 0)", (self.receiver.id,))
-                    await db.execute("UPDATE accounts SET balance = balance + ? WHERE user_id = ?", (self.amount, self.receiver.id))
-                    
-                    # 3. 履歴保存
-                    await db.execute(
-                        "INSERT INTO transactions (sender_id, receiver_id, amount, type, description, month_tag) VALUES (?, ?, ?, 'TRANSFER', ?, ?)",
-                        (self.sender.id, self.receiver.id, self.amount, f"{self.sender.display_name}からの送金", month_tag)
-                    )
-                    
-                    # ログ用データ取得
-                    async with db.execute("SELECT balance FROM accounts WHERE user_id = ?", (self.sender.id,)) as c:
-                        sender_new_bal = (await c.fetchone())['balance']
-                    async with db.execute("SELECT balance FROM accounts WHERE user_id = ?", (self.receiver.id,)) as c:
-                        receiver_new_bal = (await c.fetchone())['balance']
-
-                    await db.commit()
-
-                except Exception as db_err:
-                    await db.rollback()
-                    raise db_err
-
-            # 完了メッセージ（ボタンを無効化して更新）
-            await interaction.edit_original_response(content=f"✅ 送金成功: {self.receiver.mention} へ {self.amount:,} L 送りました。", embed=None, view=None)
-            
-            # ログ出力
-            log_ch_id = None
-            async with self.bot.get_db() as db:
+                # 5. 【追加】管理者用ログ出力（上のコードから移植）
+                log_ch_id = None
                 async with db.execute("SELECT value FROM server_config WHERE key = 'currency_log_id'") as c:
                     row = await c.fetchone()
                     if row: log_ch_id = int(row['value'])
-            
-            if log_ch_id:
-                channel = self.bot.get_channel(log_ch_id)
-                if channel:
-                    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC+09:00")
-                    embed = discord.Embed(title="送金ログ", color=0xFFD700, timestamp=datetime.datetime.now())
-                    embed.set_author(name="ElysionBOT", icon_url=self.bot.user.display_avatar.url)
-                    embed.description = f"{self.sender.mention} から {self.receiver.mention} へ **{self.amount:,} Ru** 送金されました。"
-                    embed.add_field(name="メモ", value="なし", inline=False)
-                    embed.add_field(
-                        name="残高", 
-                        value=f"送金者: {sender_new_bal:,} Ru\n受取者: {receiver_new_bal:,} Ru", 
-                        inline=False
-                    )
-                    embed.add_field(name="実行時刻", value=now_str, inline=False)
-                    await channel.send(embed=embed)
+                
+                if log_ch_id:
+                    channel = self.bot.get_channel(log_ch_id)
+                    if channel:
+                        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        log_embed = discord.Embed(title="💸 送金ログ", color=0xFFD700)
+                        log_embed.description = f"{self.sender.mention} ➔ {self.receiver.mention}"
+                        log_embed.add_field(name="金額", value=f"**{self.amount:,} Ru**", inline=True)
+                        log_embed.add_field(name="備考", value=self.msg, inline=True)
+                        log_embed.add_field(name="処理後残高", value=f"送: {sender_new_bal:,} Ru\n受: {receiver_new_bal:,} Ru", inline=False)
+                        log_embed.set_footer(text=f"Time: {now_str}")
+                        await channel.send(embed=log_embed)
 
-        except Exception as e:
-            logger.error(f"Transfer Error: {e}")
-            await interaction.followup.send("❌ エラーが発生しました。", ephemeral=True)
+            except Exception as e:
+                await db.rollback()
+                await interaction.followup.send(f"❌ エラーが発生しました: {e}", ephemeral=True)
 
     @discord.ui.button(label="❌ キャンセル", style=discord.ButtonStyle.grey)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.processed: return
         self.processed = True
+        
+        if interaction.user.id != self.sender.id:
+            return await interaction.response.send_message("❌ 操作権限がありません。", ephemeral=True)
+
+        self.stop()
+        # メッセージを更新してキャンセルを通知
         await interaction.response.edit_message(content="❌ 送金をキャンセルしました。", embed=None, view=None)
 
 
@@ -629,64 +661,6 @@ class Economy(commands.Cog):
                 return True
         return False
 
-class TransferConfirmView(discord.ui.View):
-    def __init__(self, bot, sender, receiver, amount, message):
-        super().__init__(timeout=60)
-        self.bot = bot
-        self.sender = sender
-        self.receiver = receiver
-        self.amount = amount
-        self.msg = message
-
-    @discord.ui.button(label="送金を実行する", style=discord.ButtonStyle.green)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        
-        async with self.bot.get_db() as db:
-            # 送金元の残高チェック
-            async with db.execute("SELECT balance FROM accounts WHERE user_id = ?", (self.sender.id,)) as c:
-                row = await c.fetchone()
-                if not row or row['balance'] < self.amount:
-                    return await interaction.followup.send("❌ 残高が不足しています。", ephemeral=True)
-
-            try:
-                # 送金処理
-                await db.execute("UPDATE accounts SET balance = balance - ? WHERE user_id = ?", (self.amount, self.sender.id))
-                await db.execute("""
-                    INSERT INTO accounts (user_id, balance) VALUES (?, ?)
-                    ON CONFLICT(user_id) DO UPDATE SET balance = balance + excluded.balance
-                """, (self.receiver.id, self.amount))
-                
-                # 履歴保存
-                await db.execute("""
-                    INSERT INTO transactions (sender_id, receiver_id, amount, type, description)
-                    VALUES (?, ?, ?, 'TRANSFER', ?)
-                """, (self.sender.id, self.receiver.id, self.amount, self.msg))
-                
-                await db.commit()
-                self.stop()
-                await interaction.followup.send(f"✅ {self.receiver.mention} へ {self.amount:,} Ru 送金しました。", ephemeral=True)
-
-                # ★ 受取通知 DM (画像 1000004644.png の再現)
-                try:
-                    # DM通知設定を確認（Salaryで追加した設定を流用）
-                    async with db.execute("SELECT dm_salary_enabled FROM user_settings WHERE user_id = ?", (self.receiver.id,)) as c:
-                        res = await c.fetchone()
-                        if res and res['dm_salary_enabled'] == 0: return # 通知OFFなら送らない
-
-                    embed = discord.Embed(title="💰 Ru_men受取通知", color=discord.Color.green())
-                    embed.add_field(name="送金者", value=self.sender.mention, inline=False)
-                    embed.add_field(name="受取額", value=f"**{self.amount:,} Ru**", inline=False)
-                    embed.add_field(name="メッセージ", value=f"`{self.msg}`", inline=False)
-                    embed.timestamp = datetime.datetime.now()
-                    
-                    await self.receiver.send(embed=embed)
-                except:
-                    pass # DMが閉鎖されている場合は無視
-
-            except Exception as e:
-                await db.rollback()
-                await interaction.followup.send(f"❌ エラーが発生しました: {e}", ephemeral=True)
 
 class Salary(commands.Cog):
     def __init__(self, bot):
@@ -1402,16 +1376,16 @@ def cyan(t): return ansi(t, "1;36")   # 水色 (文字)
 def white(t): return ansi(t, "1;37")  # 白 (名前)
 def bg_red(t): return ansi(t, "0;41") # 背景赤 (強調)
 
-# --- 1行サイコロのデザイン ---
-# スマホでも崩れないように、[ :.: ] みたいな形にしています
+# --- 1行サイコロのデザイン（ハイブリッド版） ---
+# [ ⚀ ] のように、枠で囲むことで存在感を出します
 CYBER_DICE = {
-    1: "[  ●  ]", 
-    2: "[  :  ]",  
-    3: "[ .:. ]",  
-    4: "[ ::  ]",  
-    5: "[ :.: ]",  
-    6: "[ ::: ]",  
-    "?": "[ /// ]"
+    1: "[ ⚀ ]", 
+    2: "[ ⚁ ]",  
+    3: "[ ⚂ ]",  
+    4: "[ ⚃ ]",  
+    5: "[ ⚄ ]",  
+    6: "[ ⚅ ]",  
+    "?": "[ 🎲 ]"
 }
 
 # --- ボタンの設定 (View) ---
@@ -1498,7 +1472,7 @@ class DoubleUpView(discord.ui.View):
         self.choice = "collect"
         self.stop()
 
-# --- 本体 (Botの脳みそ) ---
+#--- 本体 (Botの脳みそ) ---
 
 class Chinchiro(commands.Cog):
     def __init__(self, bot):
@@ -1533,12 +1507,13 @@ class Chinchiro(commands.Cog):
         # 一定確率で文字をグチャグチャにします
         return "".join([c if random.random() > intensity else random.choice(glitch_chars) for c in chars])
 
-    # 1行サイコロの文字列を作る機能
+    # 1行サイコロの文字列を作る機能（★修正点：間隔を調整）
     def get_cyber_dice_string(self, dice_list):
-        row = "   ".join([CYBER_DICE.get(num, CYBER_DICE["?"]) for num in dice_list])
+        # 枠付き絵文字を使うため、間隔を "   " から "  " に狭めています
+        row = "  ".join([CYBER_DICE.get(num, CYBER_DICE["?"]) for num in dice_list])
         return row
 
-    # 画面（HUD）を作る機能
+    # 画面（HUD）を作る機能（★修正点：絵文字幅のズレ補正）
     def render_hud(self, player_name, dice_list, status, color_mode="blue", log_msg=""):
         # 色の設定
         c_frame = cyan 
@@ -1561,6 +1536,9 @@ class Chinchiro(commands.Cog):
         log_txt = green(f"▶ {log_msg}") if log_msg else blue("▶ ...")
         dice_row = self.get_cyber_dice_string(dice_list)
         
+        # ★ここが重要：絵文字の見た目幅と文字数のズレを補正 (-3)
+        dice_centered = dice_row.center(26 - 3)
+        
         # 画面のデザインを組み立てます（スマホで見ても崩れない幅）
         hud = (
             f"```ansi\n"
@@ -1568,7 +1546,7 @@ class Chinchiro(commands.Cog):
             f"{c_frame('┃')} {c_name(player_name.center(26))} {c_frame('┃')}\n"
             f"{c_frame('┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫')}\n"
             f"{c_frame('┃')}                          {c_frame('┃')}\n"
-            f"{c_frame('┃')} {dice_row.center(26)} {c_frame('┃')}\n"
+            f"{c_frame('┃')} {dice_centered} {c_frame('┃')}\n"
             f"{c_frame('┃')}                          {c_frame('┃')}\n"
             f"{c_frame('┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫')}\n"
             f"{c_frame('┃')} {c_status(status.center(26))} {c_frame('┃')}\n"
@@ -1591,6 +1569,7 @@ class Chinchiro(commands.Cog):
                 embed.set_field_at(field_idx, name=f"🎲 {player_name} のターン", value=hud, inline=False)
                 await msg.edit(embed=embed)
                 await asyncio.sleep(0.6)
+
 
             # 2. 第1停止（1つ目が止まる）
             d1 = final_dice[0]
@@ -1964,9 +1943,6 @@ class Chinchiro(commands.Cog):
         
         await msg.edit(embed=embed, view=None)
 
-
-
-
 class Slot(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -1980,79 +1956,139 @@ class Slot(commands.Cog):
             "MISS":    "💨"  # ハズレ
         }
         
-        # 確率テーブル (合計1000)
-        # RTP(還元率) 約87% = 運営利益 約13%
-        self.PROBABILITY = [
-            ("DIAMOND", 1,   100), # 0.1%  (x100) -> 期待値 0.1
-            ("SEVEN",   4,   20),  # 0.4%  (x20)  -> 期待値 0.08
-            ("WILD",    15,  10),  # 1.5%  (x10)  -> 期待値 0.15
-            ("BELL",    60,  5),   # 6.0%  (x5)   -> 期待値 0.30
-            ("CHERRY",  120, 2),   # 12.0% (x2)   -> 期待値 0.24
-            ("MISS",    800, 0)    # 80.0% (ハズレ)
-        ]
-        # 合計期待値 = 0.87 (ユーザーは平均して87%しか戻ってこない＝銀行が勝つ)
+        # 設定ごとの確率テーブル (合計1000)
+        # weightの合計値を変えることで期待値を調整
+        self.MODES = {
+            "1": { # 設定1: 回収モード (RTP 約82%)
+                "probs": [
+                    ("DIAMOND", 1, 100), ("SEVEN", 3, 20), ("WILD", 10, 10),
+                    ("BELL", 50, 5), ("CHERRY", 100, 2), ("MISS", 836, 0)
+                ],
+                "name": "設定1 (地獄)"
+            },
+            "4": { # 設定4: 通常モード (RTP 約90%)
+                "probs": [
+                    ("DIAMOND", 1, 100), ("SEVEN", 4, 20), ("WILD", 15, 10),
+                    ("BELL", 65, 5), ("CHERRY", 120, 2), ("MISS", 795, 0)
+                ],
+                "name": "設定4 (通常)"
+            },
+            "6": { # 設定6: 天国モード (RTP 約98%)
+                "probs": [
+                    ("DIAMOND", 2, 100), ("SEVEN", 6, 20), ("WILD", 25, 10),
+                    ("BELL", 80, 5), ("CHERRY", 130, 2), ("MISS", 757, 0)
+                ],
+                "name": "設定6 (激甘)"
+            },
+            "GOD": { # 隠し設定: 100%越え (RTP 約115%)
+                "probs": [
+                    ("DIAMOND", 5, 100), ("SEVEN", 15, 20), ("WILD", 40, 10),
+                    ("BELL", 100, 5), ("CHERRY", 150, 2), ("MISS", 690, 0)
+                ],
+                "name": "設定L (GOD)"
+            }
+        }
 
-    def determine_outcome(self):
-        """確率テーブルに基づいて結果を先に決定する"""
+    async def get_current_mode(self):
+        """DBから現在の設定を取得"""
+        mode = "4" # デフォルト設定4
+        async with self.bot.get_db() as db:
+            async with db.execute("SELECT value FROM server_config WHERE key = 'slot_mode'") as cursor:
+                row = await cursor.fetchone()
+                if row: mode = row['value']
+        return mode
+
+    def determine_outcome(self, mode_key):
+        """設定に基づいて結果を決定"""
+        probs = self.MODES.get(mode_key, self.MODES["4"])["probs"]
         rand = random.randint(1, 1000)
         current = 0
-        for name, weight, payout in self.PROBABILITY:
+        for name, weight, payout in probs:
             current += weight
             if rand <= current:
                 return name, payout
         return "MISS", 0
 
-    def generate_grid(self, outcome_name):
-        """決定した結果に基づいてグリッドを生成する（リーチ演出用）"""
-        # 基本はハズレ図柄で埋める
+    def generate_grid(self, outcome_name, force_reach=False):
+        """グリッド生成。force_reach=Trueなら必ずリーチ目ハズレを作る"""
         grid = [[self.SYMBOLS["MISS"] for _ in range(3)] for _ in range(3)]
-        
-        # ランダムなハズレ目で埋め尽くす（見た目をバラけさせる）
         deco_symbols = [v for k, v in self.SYMBOLS.items() if k != "DIAMOND"]
+
+        # ランダム埋め
         for r in range(3):
             for c in range(3):
                 grid[r][c] = random.choice(deco_symbols)
 
-        # 当たりの場合、中央横一列（Payline 2）を書き換える
         if outcome_name != "MISS":
+            # 当たり: 中央揃え
             sym = self.SYMBOLS[outcome_name]
             grid[1] = [sym, sym, sym]
         else:
-            # ハズレの場合、絶対に揃わないように中央を調整
-            # ただし「惜しい！」と思わせるため、わざとリーチ目(xxo)を作ることもある
-            if random.random() < 0.3: # 30%でリーチハズレ
+            # ハズレ
+            if force_reach or random.random() < 0.2: # 20%で自然リーチ
+                # リーチ目作成 (例: 7-7-💨)
                 target = random.choice(list(self.SYMBOLS.values()))
                 grid[1] = [target, target, self.SYMBOLS["MISS"]]
             else:
-                # バラバラにする
+                # 完全バラバラ
                 grid[1][0] = random.choice(deco_symbols)
                 grid[1][1] = random.choice([s for s in deco_symbols if s != grid[1][0]])
                 grid[1][2] = random.choice(deco_symbols)
-
         return grid
 
-    def format_grid(self, grid, highlight=False):
-        """グリッドを文字列化。highlight=Trueなら中央を目立たせる"""
+    def format_grid(self, grid, highlight=False, flash_color=None):
+        """
+        グリッド文字列化。
+        highlight: 当たりライン強調
+        flash_color: 全体をANSIカラーで光らせる (gold, red, etc)
+        """
+        # ANSIカラー定義
+        colors = {
+            "gold": ("\u001b[1;33m", "\u001b[0m"), # 黄色太字
+            "red":  ("\u001b[1;31m", "\u001b[0m"), # 赤太字
+            "blue": ("\u001b[1;34m", "\u001b[0m"), # 青太字
+        }
+        pre, suf = colors.get(flash_color, ("", ""))
+        
         rows = []
         for r in range(3):
             line = f"┃ {' ┃ '.join(grid[r])} ┃"
             if r == 1 and highlight:
-                line = f"▶ {' ┃ '.join(grid[r])} ◀" # 当たりライン強調
-            rows.append(line)
+                line = f"▶ {' ┃ '.join(grid[r])} ◀"
+            rows.append(pre + line + suf)
         
-        sep = "┣━━━╋━━━╋━━━┫"
-        top = "┏━━━┳━━━┳━━━┓"
-        btm = "┗━━━┻━━━┻━━━┛"
-        return f"```\n{top}\n{rows[0]}\n{sep}\n{rows[1]}\n{sep}\n{rows[2]}\n{btm}\n```"
+        sep = pre + "┣━━━╋━━━╋━━━┫" + suf
+        top = pre + "┏━━━┳━━━┳━━━┓" + suf
+        btm = pre + "┗━━━┻━━━┻━━━┛" + suf
+        return f"```ansi\n{top}\n{rows[0]}\n{sep}\n{rows[1]}\n{sep}\n{rows[2]}\n{btm}\n```"
 
-    @app_commands.command(name="スロット", description="80%はハズレ。勝てば天国、負ければ養分。")
+    # --- 管理者用設定コマンド ---
+    @app_commands.command(name="スロット設定", description="【管理者】スロットの勝率設定を変更します")
+    @app_commands.describe(mode="設定値 (1:回収 / 4:通常 / 6:激甘 / GOD:暴走)")
+    @app_commands.choices(mode=[
+        app_commands.Choice(name="設定1 (回収: 82%)", value="1"),
+        app_commands.Choice(name="設定4 (通常: 90%)", value="4"),
+        app_commands.Choice(name="設定6 (激甘: 98%)", value="6"),
+        app_commands.Choice(name="設定L (GOD: 115%)", value="GOD"),
+    ])
+    @has_permission("ADMIN")
+    async def config_slot(self, interaction: discord.Interaction, mode: str):
+        async with self.bot.get_db() as db:
+            await db.execute("INSERT OR REPLACE INTO server_config (key, value) VALUES ('slot_mode', ?)", (mode,))
+            await db.commit()
+        
+        mode_name = self.MODES[mode]["name"]
+        await interaction.response.send_message(f"✅ スロットの設定を **{mode_name}** に変更しました。\n※これ以降の回転から適用されます。", ephemeral=True)
+
+    # --- メインのスロットコマンド ---
+    @app_commands.command(name="スロット", description="運命のレバーを叩け。")
     @app_commands.describe(bet="賭け金 (500 Ru 〜)")
     async def slot(self, interaction: discord.Interaction, bet: int):
         if bet < 500: return await interaction.response.send_message("500Ru以下？冷やかしなら帰って。", ephemeral=True)
         await interaction.response.defer()
         user = interaction.user
 
-        # 1. 残高処理（先払い）
+        # 1. 残高処理
         async with self.bot.get_db() as db:
             async with db.execute("SELECT balance FROM accounts WHERE user_id = ?", (user.id,)) as c:
                 row = await c.fetchone()
@@ -2060,83 +2096,128 @@ class Slot(commands.Cog):
                     return await interaction.followup.send("お金ないじゃん。出直してきな♡")
             
             await db.execute("UPDATE accounts SET balance = balance - ? WHERE user_id = ?", (bet, user.id))
-            await db.execute("UPDATE accounts SET balance = balance + ? WHERE user_id = 0", (bet,)) # 全額一旦銀行へ
+            await db.execute("UPDATE accounts SET balance = balance + ? WHERE user_id = 0", (bet,))
             await db.commit()
 
-        # 2. 結果の事前決定（出来レース）
-        outcome_name, multiplier = self.determine_outcome()
-        final_grid = self.generate_grid(outcome_name)
+        # 2. 結果決定
+        current_mode = await self.get_current_mode()
+        outcome_name, multiplier = self.determine_outcome(current_mode)
         
+        # ★演出用ロジック: 「復活（滑り）」の判定
+        # もし当たりなら、そのまま当たりグリッドを作る
+        # もしハズレなら、たまに「リーチ目」にしてから「復活」させて当たりに変える演出を入れる
+        is_respin = False
+        respin_target = None
+        
+        if outcome_name == "MISS":
+            # ハズレ時、10%の確率で「嘘ハズレ（実は当たり）」に書き換える（設定が高いほど起きやすいとかも可）
+            # ここではシンプルに一律10%で「復活当選」
+            if random.random() < 0.10: 
+                is_respin = True
+                # 復活後の当たり役を決める（WILD以上の高配当が出やすいことにする）
+                respin_target = random.choice(["WILD", "SEVEN", "DIAMOND"])
+                multiplier = dict(self.MODES["4"]["probs"])[respin_target] # 倍率は通常設定参照
+                outcome_name = respin_target # 結果を上書き
+        
+        # グリッド生成
+        if is_respin:
+            # 復活演出用: 最初は「リーチ目ハズレ」を表示する必要がある
+            final_grid = self.generate_grid(outcome_name) # 最終形（当たり）
+            temp_miss_grid = self.generate_grid("MISS", force_reach=True) # 途中経過（リーチハズレ）
+            # temp_miss_gridの左と中は、最終的な当たり絵柄に合わせておく
+            sym = self.SYMBOLS[outcome_name]
+            temp_miss_grid[1][0] = sym
+            temp_miss_grid[1][1] = sym
+            # 右だけハズレ
+            temp_miss_grid[1][2] = self.SYMBOLS["MISS"]
+        else:
+            final_grid = self.generate_grid(outcome_name)
+            temp_miss_grid = None
+
         # Embed作成
         embed = discord.Embed(title="🎰 エリュシオン・ドリームスロット", color=0x2f3136)
         embed.add_field(name="BET", value=f"**{bet:,} Ru**")
         embed.add_field(name="STATUS", value="Spinning...")
         msg = await interaction.followup.send(embed=embed)
 
-        # 3. 回転演出（これが重要）
-        # 第1リール停止
+        # 3. 回転演出
         await asyncio.sleep(0.5)
-        # 表示用の一時グリッドを作成
-        disp_grid = [row[:] for row in final_grid]
-        
-        # 第1停止: 左側だけ確定させる
-        disp_grid[0][1] = "🌀"
-        disp_grid[1][1] = "🌀"
-        disp_grid[2][1] = "🌀"
-        disp_grid[0][2] = "🌀"
-        disp_grid[1][2] = "🌀"
-        disp_grid[2][2] = "🌀"
+        # 第1停止
+        disp_grid = [row[:] for row in (temp_miss_grid if is_respin else final_grid)]
+        # まだ隠す
+        disp_grid[0][1], disp_grid[1][1], disp_grid[2][1] = "🌀", "🌀", "🌀"
+        disp_grid[0][2], disp_grid[1][2], disp_grid[2][2] = "🌀", "🌀", "🌀"
         
         embed.description = self.format_grid(disp_grid)
         await msg.edit(embed=embed)
 
-        # 第2リール停止
+        # 第2停止
         await asyncio.sleep(0.8)
-        disp_grid[0][1] = final_grid[0][1]
-        disp_grid[1][1] = final_grid[1][1]
-        disp_grid[2][1] = final_grid[2][1]
+        disp_grid[0][1], disp_grid[1][1], disp_grid[2][1] = \
+            (temp_miss_grid if is_respin else final_grid)[0][1], \
+            (temp_miss_grid if is_respin else final_grid)[1][1], \
+            (temp_miss_grid if is_respin else final_grid)[2][1]
+        
         embed.description = self.format_grid(disp_grid)
         await msg.edit(embed=embed)
 
-        # ★リーチ判定（中央ラインの左と中が同じならリーチ）
-        is_reach = (final_grid[1][0] == final_grid[1][1])
-        
+        # リーチ判定
+        is_reach = (disp_grid[1][0] == disp_grid[1][1])
         if is_reach:
-            # リーチ演出
             embed.color = 0xffff00
             embed.add_field(name="🔥 チャンス！", value="リーチ！来るか…！？", inline=False)
             await msg.edit(embed=embed)
-            await asyncio.sleep(1.5) # 溜め
+            await asyncio.sleep(1.5)
 
-            # 激アツ演出（高配当確定の場合）
-            if outcome_name in ["SEVEN", "DIAMOND", "WILD"]:
-                embed.description = f"{self.format_grid(disp_grid)}\n{GEKIATSU} **激 ア ツ** {GEKIATSU}\n「こ、これは…！？ 銀行が揺れてる…！？」"
-                embed.color = 0xff0000
-                await msg.edit(embed=embed)
-                await asyncio.sleep(1.5)
-
-        # 第3リール停止（運命の瞬間）
+        # 第3停止
         await asyncio.sleep(0.5)
-        embed.description = self.format_grid(final_grid, highlight=(multiplier > 0))
         
-        # 4. 結果処理
+        if is_respin:
+            # 一旦ハズレ目を出す
+            embed.description = self.format_grid(temp_miss_grid)
+            embed.color = 0x2f3136
+            embed.clear_fields()
+            embed.add_field(name="RESULT", value="...", inline=False)
+            await msg.edit(embed=embed)
+            
+            # タメる
+            await asyncio.sleep(1.0)
+            
+            # 復活演出！
+            embed.color = 0xff0000 # 赤く光る
+            embed.description = f"{self.format_grid(temp_miss_grid, flash_color='red')}\n\n🛑 **キュイン！滑り発生！！** 🛑"
+            await msg.edit(embed=embed)
+            await asyncio.sleep(1.5)
+            
+            # 最終的な当たり目を表示
+            final_display = final_grid
+        else:
+            final_display = final_grid
+
+        # 最終結果表示
+        # 777なら金色にする
+        flash = "gold" if outcome_name == "SEVEN" else None
+        if outcome_name == "DIAMOND": flash = "blue"
+        
+        embed.description = self.format_grid(final_display, highlight=(multiplier > 0), flash_color=flash)
+        
+        # 4. 精算処理
         if multiplier > 0:
             payout = bet * multiplier
             async with self.bot.get_db() as db:
                 await db.execute("UPDATE accounts SET balance = balance + ? WHERE user_id = ?", (payout, user.id))
                 await db.commit()
 
-            # 勝った時のセリフ
             if outcome_name == "DIAMOND":
                 comment = "💎 **JACKPOT!!** 💎\n「う、嘘…！？私の銀行からこんなに持っていくなんて…！身体で返してよ！！///」"
                 color = 0xffffff
             elif outcome_name == "SEVEN":
-                comment = "7️⃣ **BIG WIN!!** 7️⃣\n「やるじゃない！悔しいけど…おめでとう！」"
+                comment = "7️⃣ **BIG WIN!!** 7️⃣\n「7が揃った…だと…！？ おめでとう！美しい輝きね！」"
                 color = 0xffd700
             elif outcome_name == "WILD":
                 comment = "🃏 **SUPER WIN!** 🃏\n「あんた、持ってるわね…。ちょっと見直したかも。」"
                 color = 0xff00ff
-            else: # BELL, CHERRY
+            else:
                 comment = "🎉 **WIN!**\n「ま、これくらいなら小遣いとしてあげるわ。」"
                 color = 0x00ff00
             
@@ -2145,8 +2226,7 @@ class Slot(commands.Cog):
             embed.color = color
             
         else:
-            # 負け（ジャックポットチャージ）
-            charge = int(bet * 0.05) # 負け額の5%をプールへ
+            charge = int(bet * 0.05)
             async with self.bot.get_db() as db:
                 await db.execute("""
                     INSERT INTO server_config (key, value) VALUES ('jackpot_pool', ?) 
@@ -2154,13 +2234,7 @@ class Slot(commands.Cog):
                 """, (charge, charge))
                 await db.commit()
             
-            # 負けた時の煽り
-            replies = [
-                "養分乙♡ そのRu、美味しく頂くわね！",
-                "あらら、ハズレ。日頃の行いが悪いんじゃない？w",
-                "ざぁ〜こ♡ 悔しかったらもっと賭けなさいよ！",
-                "あーあ。銀行の肥やしが増えちゃった♡"
-            ]
+            replies = ["養分乙♡", "日頃の行いが悪いんじゃない？", "銀行の肥やしが増えちゃった♡"]
             comment = f"💀 **LOSE...**\n「{random.choice(replies)}」"
             embed.color = 0x2f3136
             embed.clear_fields()
@@ -2168,6 +2242,7 @@ class Slot(commands.Cog):
 
         embed.description += f"\n\n{comment}"
         await msg.edit(embed=embed)
+
 
 
 class ServerStats(commands.Cog):
