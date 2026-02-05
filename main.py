@@ -1143,55 +1143,88 @@ class Omikuji(commands.Cog):
 
         await interaction.followup.send(embed=embed)
         
-# --- Cog: VoiceSystem  ---
+# --- Cog: VoiceSystem (改良版) ---
 class VoiceSystem(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.target_vc_ids = set() 
         self.is_ready_processed = False
+        self.locks = {} # ユーザーごとのロック {user_id: asyncio.Lock()}
+        self.reward_rate = 50 # 基本レート (Ru/分)
+
+    def get_lock(self, user_id):
+        if user_id not in self.locks:
+            self.locks[user_id] = asyncio.Lock()
+        return self.locks[user_id]
 
     async def reload_targets(self):
         try:
             async with self.bot.get_db() as db:
+                # 報酬対象VCの読み込み
                 async with db.execute("SELECT channel_id FROM reward_channels") as cursor:
                     rows = await cursor.fetchall()
+                self.target_vc_ids = {row['channel_id'] for row in rows}
+                
+                # 報酬レートの読み込み (設定がなければデフォルト50)
+                async with db.execute("SELECT value FROM server_config WHERE key = 'vc_reward_rate'") as cursor:
+                    row = await cursor.fetchone()
+                    if row: self.reward_rate = int(row['value'])
             
-            self.target_vc_ids = {row['channel_id'] for row in rows}
-            logger.info(f"Loaded {len(self.target_vc_ids)} reward VC targets.")
+            logger.info(f"Loaded {len(self.target_vc_ids)} reward VCs. Rate: {self.reward_rate}/min")
         except Exception as e:
-            logger.error(f"Failed to load reward channels: {e}")
+            logger.error(f"Failed to load voice config: {e}")
+
+    # インフレ対策コマンド: 報酬レートの変更
+    @app_commands.command(name="vc報酬レート設定", description="【管理者】VC報酬の基本レート(1分あたり)を変更します")
+    @has_permission("ADMIN")
+    async def set_vc_rate(self, interaction: discord.Interaction, amount: int):
+        if amount < 0: return await interaction.response.send_message("❌ 0以上にしてください。", ephemeral=True)
+        
+        async with self.bot.get_db() as db:
+            await db.execute("INSERT OR REPLACE INTO server_config (key, value) VALUES ('vc_reward_rate', ?)", (str(amount),))
+            await db.commit()
+        
+        self.reward_rate = amount
+        await interaction.response.send_message(f"✅ VC報酬レートを **{amount} Ru / 分** に変更しました。\n(インフレ時は下げ、キャンペーン時は上げてください)", ephemeral=True)
 
     def is_active(self, state):
+        # 判定強化: サーバーミュート/自己ミュート/サーバー拒否/自己拒否 すべてチェック
         return (
             state and 
             state.channel and 
             state.channel.id in self.target_vc_ids and  
-            not state.self_deaf and 
-            not state.deaf
+            not state.self_deaf and not state.deaf and # 聞けない状態はNG
+            not state.self_mute and not state.mute     # ★追加: 喋れない状態(ミュート)もNGにするならこれを入れる
         )
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
         if member.bot: return
-        now = datetime.datetime.now()
-        was_active, is_now_active = self.is_active(before), self.is_active(after)
+        
+        # ロックを取得して同時実行を防ぐ
+        async with self.get_lock(member.id):
+            now = datetime.datetime.now()
+            was_active, is_now_active = self.is_active(before), self.is_active(after)
 
-        if not was_active and is_now_active:
-            try:
-                async with self.bot.get_db() as db:
-                    await db.execute(
-                        "INSERT OR REPLACE INTO voice_tracking (user_id, join_time) VALUES (?,?)", 
-                        (member.id, now.isoformat())
-                    )
-                    await db.commit()
-            except Exception as e:
-                logger.error(f"Voice Tracking Error: {e}")
+            # 入室 (または条件達成)
+            if not was_active and is_now_active:
+                try:
+                    async with self.bot.get_db() as db:
+                        await db.execute(
+                            "INSERT OR REPLACE INTO voice_tracking (user_id, join_time) VALUES (?,?)", 
+                            (member.id, now.isoformat())
+                        )
+                        await db.commit()
+                except Exception as e:
+                    logger.error(f"Voice Tracking Error: {e}")
 
-        elif was_active and not is_now_active:
-            await self._process_reward(member, now)
+            # 退室 (または条件未達)
+            elif was_active and not is_now_active:
+                await self._process_reward(member, now)
 
     async def _process_reward(self, member_or_id, now):
         user_id = member_or_id.id if isinstance(member_or_id, discord.Member) else member_or_id
+        
         try:
             async with self.bot.get_db() as db:
                 async with db.execute("SELECT join_time FROM voice_tracking WHERE user_id =?", (user_id,)) as cursor:
@@ -1205,7 +1238,9 @@ class VoiceSystem(commands.Cog):
                     if sec < 60:
                         reward = 0
                     else:
-                        reward = (sec * 50) // 60 
+                        # 設定されたレートを使って計算
+                        # reward_rate は "1分あたりの額" なので、秒数にかけて 60 で割る
+                        reward = int(self.reward_rate * (sec / 60))
 
                     if reward > 0:
                         month_tag = now.strftime("%Y-%m")
@@ -1232,8 +1267,8 @@ class VoiceSystem(commands.Cog):
                         embed = discord.Embed(title="🎙 VC報酬精算", color=discord.Color.blue(), timestamp=now)
                         embed.add_field(name="ユーザー", value=f"<@{user_id}>")
                         embed.add_field(name="付与額", value=f"{reward:,} L")
+                        embed.add_field(name="レート", value=f"{self.reward_rate} L/min", inline=True) # レートもログに残す
                         embed.add_field(name="滞在時間", value=f"{sec // 60}分")
-                        # 修正: send_admin_log -> send_bank_log
                         await self.bot.send_bank_log('currency_log_id', embed)
 
                 except Exception as db_err:
@@ -1243,34 +1278,13 @@ class VoiceSystem(commands.Cog):
         except Exception as e:
             logger.error(f"Voice Reward Process Error [{user_id}]: {e}")
 
+    # (on_ready は元のまま)
     @commands.Cog.listener()
     async def on_ready(self):
         if self.is_ready_processed: return
         self.is_ready_processed = True
-        
         await self.reload_targets()
-
-        await asyncio.sleep(10)
-        now = datetime.datetime.now()
         
-        try:
-            async with self.bot.get_db() as db:
-                async with db.execute("SELECT user_id FROM voice_tracking") as cursor:
-                    tracked_users = await cursor.fetchall()
-                
-                for row in tracked_users:
-                    u_id = row['user_id']
-                    is_active_now = False
-                    for guild in self.bot.guilds:
-                        member = guild.get_member(u_id)
-                        if member and self.is_active(member.voice):
-                            is_active_now = True
-                            break
-                    
-                    if not is_active_now:
-                        await self._process_reward(u_id, now)
-        except Exception as e:
-            logger.error(f"Recovery Error: {e}")
 
 class VoiceHistory(commands.Cog):
     def __init__(self, bot):
@@ -2349,6 +2363,7 @@ class Slot(commands.Cog):
             await interaction.followup.send(f"❌ エラー: `{e}`", ephemeral=True)
 
 
+# --- Cog: ServerStats (究極の経済白書版) ---
 class ServerStats(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -2358,126 +2373,193 @@ class ServerStats(commands.Cog):
     def cog_unload(self):
         self.daily_log_task.cancel()
 
-    async def get_citizen_balances(self):
+    # 市民の残高リストと、アクティブな市民数を取得
+    async def get_economic_data(self):
         guild = self.bot.guilds[0]
         if not guild.chunked:
             await guild.chunk()
 
         async with self.bot.get_db() as db:
+            # 設定読み込み
             god_role_ids = [r_id for r_id, level in self.bot.config.admin_roles.items() if level == "SUPREME_GOD"]
             citizen_role_id = None
-            active_threshold_days = 30
+            active_days = 30
             async with db.execute("SELECT key, value FROM server_config") as cursor:
                 async for row in cursor:
                     if row['key'] == 'citizen_role_id': citizen_role_id = int(row['value'])
-                    elif row['key'] == 'active_threshold_days': active_threshold_days = int(row['value'])
+                    elif row['key'] == 'active_threshold_days': active_days = int(row['value'])
 
-            cutoff = datetime.datetime.now() - datetime.timedelta(days=active_threshold_days)
-            sql = "SELECT DISTINCT sender_id, receiver_id FROM transactions WHERE created_at > ?"
-            async with db.execute(sql, (cutoff,)) as cursor:
+            # アクティブユーザー特定
+            cutoff = datetime.datetime.now() - datetime.timedelta(days=active_days)
+            async with db.execute("SELECT DISTINCT sender_id, receiver_id FROM transactions WHERE created_at > ?", (cutoff,)) as cursor:
                 rows = await cursor.fetchall()
-                active_user_ids = {r[0] for r in rows} | {r[1] for r in rows}
+                active_ids = {r[0] for r in rows} | {r[1] for r in rows}
 
+            # 全口座取得
             async with db.execute("SELECT user_id, balance FROM accounts") as cursor:
-                user_balances = {row['user_id']: row['balance'] for row in await cursor.fetchall()}
+                all_balances = {row['user_id']: row['balance'] for row in await cursor.fetchall()}
 
-        balances = []
+            # 24時間以内の取引総額 (GDPの指標)
+            cutoff_24h = datetime.datetime.now() - datetime.timedelta(days=1)
+            async with db.execute("SELECT SUM(amount) FROM transactions WHERE created_at > ?", (cutoff_24h,)) as c:
+                res = await c.fetchone()
+                daily_volume = res[0] if res[0] else 0
+
+        # 集計対象のフィルタリング
+        valid_balances = []
         for member in guild.members:
-            if member.bot or any(role.id in god_role_ids for role in member.roles): continue
-            if citizen_role_id and not any(role.id == citizen_role_id for role in member.roles): continue
-            if member.id not in active_user_ids: continue
-            balances.append(user_balances.get(member.id, 0))
+            if member.bot: continue
+            if any(role.id in god_role_ids for role in member.roles): continue # 神は除外
+            if citizen_role_id and not any(role.id == citizen_role_id for role in member.roles): continue # 市民以外除外
+            if member.id not in active_ids: continue # 非アクティブ除外
+            
+            valid_balances.append(all_balances.get(member.id, 0))
         
-        return balances, active_threshold_days
+        return valid_balances, daily_volume, active_days
 
     @tasks.loop(hours=24)
     async def daily_log_task(self):
         try:
-            balances, _ = await self.get_citizen_balances()
+            balances, _, _ = await self.get_economic_data()
             total = sum(balances)
+            today = datetime.datetime.now().strftime("%Y-%m-%d")
+            
             async with self.bot.get_db() as db:
                 await db.execute("CREATE TABLE IF NOT EXISTS daily_stats (date TEXT PRIMARY KEY, total_balance INTEGER)")
-                await db.execute("INSERT OR REPLACE INTO daily_stats (date, total_balance) VALUES (?, ?)", 
-                                 (datetime.datetime.now().strftime("%Y-%m-%d"), total))
+                await db.execute("INSERT OR REPLACE INTO daily_stats (date, total_balance) VALUES (?, ?)", (today, total))
                 await db.commit()
         except Exception as e:
             logger.error(f"Daily Log Error: {e}")
 
-    @app_commands.command(name="経済グラフ", description="【管理者】詳細な格差判定と経済レポートを表示")
+    @app_commands.command(name="経済グラフ", description="【管理者】サーバー経済の健全性・格差・GDPを分析したレポートを発行します")
     @has_permission("ADMIN")
     async def economy_graph(self, interaction: discord.Interaction):
         await interaction.response.defer()
         
         try:
-            balances, active_days = await self.get_citizen_balances()
-            current_total = sum(balances)
-            citizen_count = len(balances)
+            # 1. データ収集
+            balances, daily_volume, active_days = await self.get_economic_data()
+            balances.sort() # 安い順にソート
             
-            gini_val = 0.0
-            if balances and current_total > 0:
-                s_bal = sorted(balances)
-                n = len(balances)
-                gini_val = (2 * sum((i + 1) * v for i, v in enumerate(s_bal)) / (n * current_total)) - (n + 1) / n
+            count = len(balances)
+            total_asset = sum(balances)
+            avg_asset = total_asset / count if count > 0 else 0
+            
+            # 2. 高度な指標計算
+            # ジニ係数
+            gini = 0.0
+            if count > 0 and total_asset > 0:
+                gini = (2 * sum((i + 1) * v for i, v in enumerate(balances)) / (count * total_asset)) - (count + 1) / count
 
+            # 富の集中度 (上位10%が持つ資産の割合)
+            top_10_count = max(1, int(count * 0.1))
+            top_10_asset = sum(balances[-top_10_count:])
+            wealth_concentration = (top_10_asset / total_asset * 100) if total_asset > 0 else 0
+
+            # 3. 過去データとの比較 (インフレ率)
+            yesterday_str = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+            
             async with self.bot.get_db() as db:
-                await db.execute("""CREATE TABLE IF NOT EXISTS last_stats_report (
-                    id INTEGER PRIMARY KEY, total_balance INTEGER, gini_val REAL, timestamp DATETIME
-                )""")
-                cutoff_24h = datetime.datetime.now() - datetime.timedelta(days=1)
-                async with db.execute("SELECT COUNT(*) FROM transactions WHERE created_at > ?", (cutoff_24h,)) as c:
-                    tx_count = (await c.fetchone())[0]
-                async with db.execute("SELECT total_balance, gini_val, timestamp FROM last_stats_report WHERE id = 1") as c:
-                    last_report = await c.fetchone()
+                # 履歴取得
                 async with db.execute("SELECT date, total_balance FROM daily_stats ORDER BY date ASC") as c:
                     history = await c.fetchall()
+                # 昨日のデータ取得
+                async with db.execute("SELECT total_balance FROM daily_stats WHERE date = ?", (yesterday_str,)) as c:
+                    y_row = await c.fetchone()
+                    yesterday_total = y_row['total_balance'] if y_row else None
 
-            if gini_val < 0.20: gini_lv, gini_color = "🕊️ ユートピア", 0x00ffff
-            elif gini_val < 0.30: gini_lv, gini_color = "🟢 平穏", 0x00ff00
-            elif gini_val < 0.40: gini_lv, gini_color = "🟡 普通", 0xffff00
-            elif gini_val < 0.50: gini_lv, gini_color = "🟠 警戒", 0xffa500
-            elif gini_val < 0.60: gini_lv, gini_color = "🔴 危険", 0xff4500
-            else: gini_lv, gini_color = "💀 崩壊", 0x000000
-
-            if last_report:
-                diff_total = current_total - last_report['total_balance']
-                rate = (diff_total / last_report['total_balance'] * 100) if last_report['total_balance'] > 0 else 0
-                inflation_text = f"{'📈' if diff_total >= 0 else '📉'} **{diff_total:+,} L** ({rate:+.2f}%)"
-                diff_gini = gini_val - last_report['gini_val']
-                gini_trend = "🔺拡大" if diff_gini > 0.005 else "🔻改善" if diff_gini < -0.005 else "➡️維持"
+            # インフレ率計算
+            if yesterday_total and yesterday_total > 0:
+                diff = total_asset - yesterday_total
+                inflation_rate = (diff / yesterday_total) * 100
+                inflation_text = f"{'📈' if diff >= 0 else '📉'} {diff:+,} L ({inflation_rate:+.2f}%)"
             else:
-                inflation_text = "🔰 初回データ"; gini_trend = "ー"
+                inflation_text = "🔰 データ不足 (比較対象なし)"
 
-            async with self.bot.get_db() as db:
-                await db.execute("""INSERT OR REPLACE INTO last_stats_report (id, total_balance, gini_val, timestamp) 
-                                 VALUES (1, ?, ?, ?)""", (current_total, gini_val, datetime.datetime.now()))
-                await db.commit()
+            # 4. レポートの装飾判定
+            # ジニ係数判定
+            if gini < 0.3: gini_rate, g_color = "🟢 健全", 0x2ecc71
+            elif gini < 0.45: gini_rate, g_color = "🟡 注意", 0xf1c40f
+            elif gini < 0.6: gini_rate, g_color = "🟠 警戒", 0xe67e22
+            else: gini_rate, g_color = "🔴 危険", 0xe74c3c
 
-            plt.figure(figsize=(10, 5))
-            try:
-                dates = [r['date'][5:] for r in history]
-                totals = [r['total_balance'] for r in history]
-                plt.plot(dates, totals, marker='o', color='#00b0f4', linewidth=2)
-                plt.title('Economy Growth History'); plt.grid(True, alpha=0.3)
-                buf = io.BytesIO(); plt.savefig(buf, format='png'); buf.seek(0)
-                file = discord.File(buf, filename="economy_graph.png")
-            finally:
-                plt.close()
-
-            activity_ratio = tx_count / max(1, citizen_count)
-            tx_comment = "🔥 過熱" if activity_ratio >= 1.0 else "🏃 活発" if activity_ratio >= 0.5 else "🚶 微動"
+            # 5. グラフ描画 (2画面構成: 左=資産推移, 右=ローレンツ曲線)
+            plt.style.use('dark_background')
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
             
-            embed = discord.Embed(title="📊 ルーメン経済レポート", color=gini_color, timestamp=datetime.datetime.now())
-            embed.add_field(name="🔄 活発度", value=f"{tx_comment} ({activity_ratio:.2f} tx/人)", inline=False)
-            embed.add_field(name="💹 資産総額変化", value=inflation_text, inline=True)
-            embed.add_field(name="⚖️ 格差レベル", value=f"**{gini_lv}** ({gini_trend})\n係数: `{gini_val:.3f}`", inline=True)
-            embed.add_field(name=f"💰 アクティブ総資産 ({citizen_count}名)", value=f"**{current_total:,} L**", inline=False)
-            embed.set_image(url="attachment://economy_graph.png")
+            # --- 左: 経済成長グラフ (Money Supply) ---
+            dates = [r['date'][5:] for r in history] # 月-日 だけ抽出
+            totals = [r['total_balance'] for r in history]
             
+            ax1.plot(dates, totals, marker='o', color='#00b0f4', linewidth=2, label='Total Supply')
+            ax1.set_title(f"Money Supply History (Total: {total_asset:,} L)", fontsize=14, color='white')
+            ax1.grid(True, alpha=0.3)
+            ax1.legend()
+            if len(dates) > 10: # データが多い場合はラベルを間引く
+                ax1.set_xticks(dates[::max(1, len(dates)//5)])
+
+            # --- 右: 格差の可視化 (Lorenz Curve) ---
+            # 完全平等の線
+            ax2.plot([0, 1], [0, 1], color='gray', linestyle='--', label='Perfect Equality')
+            
+            # 実際の分布
+            if total_asset > 0:
+                lorenz_x = [i / count for i in range(count + 1)]
+                # 累積和を計算して正規化
+                cum_assets = [0] + list(np.cumsum(balances)) if 'np' in globals() else [0] # numpyがあれば楽
+                if 'np' not in globals(): # numpyない場合の予備
+                    cum = 0
+                    cum_assets = [0]
+                    for b in balances:
+                        cum += b
+                        cum_assets.append(cum)
+                
+                lorenz_y = [c / total_asset for c in cum_assets]
+                
+                ax2.plot(lorenz_x, lorenz_y, color='#ff00ff', linewidth=3, label=f'Actual (Gini: {gini:.3f})')
+                ax2.fill_between(lorenz_x, lorenz_x, lorenz_y, color='#ff00ff', alpha=0.1) # 面積塗りつぶし
+
+            ax2.set_title("Wealth Distribution (Inequality)", fontsize=14, color='white')
+            ax2.set_xlabel("Cumulative Share of People")
+            ax2.set_ylabel("Cumulative Share of Wealth")
+            ax2.legend()
+            ax2.grid(True, alpha=0.3)
+
+            # 保存
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', bbox_inches='tight')
+            buf.seek(0)
+            file = discord.File(buf, filename="economy_report.png")
+            plt.close()
+
+            # 6. Embed作成
+            embed = discord.Embed(title="📊 エリュシオン国家経済白書", color=g_color, timestamp=datetime.datetime.now())
+            embed.set_author(name=f"発行: {interaction.guild.name} 中央銀行", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
+            
+            # 上段: マクロ経済指標
+            embed.add_field(name="💰 マネーサプライ (総資産)", value=f"**{total_asset:,} Ru**", inline=True)
+            embed.add_field(name="📈 前日比 (インフレ率)", value=inflation_text, inline=True)
+            embed.add_field(name="👥 アクティブ市民", value=f"{count} 名", inline=True)
+            
+            # 中段: 活性度
+            gdp_text = f"**{daily_volume:,} Ru**"
+            velocity = (daily_volume / total_asset * 100) if total_asset > 0 else 0
+            embed.add_field(name="🔄 24H取引高 (GDP)", value=gdp_text, inline=True)
+            embed.add_field(name="⚡ 経済回転率", value=f"{velocity:.2f}% /日", inline=True)
+            embed.add_field(name="💵 平均資産", value=f"{int(avg_asset):,} Ru", inline=True)
+
+            # 下段: 格差データ
+            embed.add_field(name="⚖️ ジニ係数 (格差)", value=f"**{gini:.3f}** [{gini_rate}]", inline=True)
+            embed.add_field(name="👑 富の集中度", value=f"上位10%が資産の **{wealth_concentration:.1f}%** を占有", inline=False)
+
+            embed.set_image(url="attachment://economy_report.png")
+            embed.set_footer(text=f"集計対象: 過去{active_days}日以内に活動履歴のある市民")
+
             await interaction.followup.send(embed=embed, file=file)
 
         except Exception as e:
-            logger.error(f"Economy Graph Error: {e}")
-            await interaction.followup.send(f"❌ レポート生成失敗: {e}")
+            logger.error(f"Economy Report Error: {e}")
+            await interaction.followup.send(f"❌ レポート生成中にエラーが発生しました: {e}")
 
 
 class ShopPurchaseView(discord.ui.View):
