@@ -1332,147 +1332,6 @@ class VoiceHistory(commands.Cog):
         
         await interaction.followup.send(embed=embed, file=file)
 
-# --- Cog: InterviewSystem  ---
-class InterviewSystem(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-
-    @app_commands.command(name="面接通過", description="指定ユーザー or 同じVCのメンバー全員にロールと初期資金を付与します")
-    @app_commands.describe(
-        role="付与するロール",
-        amount="初期付与額（デフォルト: 10,000）",
-        target="対象ユーザー（指定しない場合は、あなたと同じVCにいる全員が対象になります）"
-    )
-    @has_permission("ADMIN")
-    async def pass_interview(
-        self, 
-        interaction: discord.Interaction, 
-        role: discord.Role, 
-        amount: int = 10000, 
-        target: Optional[discord.Member] = None
-    ):
-        await interaction.response.defer()
-
-        exclude_role_id = None
-        async with self.bot.get_db() as db:
-            async with db.execute("SELECT value FROM server_config WHERE key = 'exclude_role_id'") as cursor:
-                row = await cursor.fetchone()
-                if row:
-                    exclude_role_id = int(row['value'])
-
-        targets = []
-        skipped_names = []
-
-        if target:
-            targets.append(target)
-            mode_text = f"{target.mention} を"
-        else:
-            if interaction.user.voice and interaction.user.voice.channel:
-                channel = interaction.user.voice.channel
-                raw_members = channel.members
-                
-                for m in raw_members:
-                    if exclude_role_id and any(r.id == exclude_role_id for r in m.roles):
-                        skipped_names.append(m.display_name)
-                        continue
-                    targets.append(m)
-
-                mode_text = f"VC **{channel.name}** のメンバー (除外あり)"
-            else:
-                return await interaction.followup.send("❌ 対象を指定するか、ボイスチャンネルに参加した状態で実行してください。", ephemeral=True)
-
-        if not targets:
-            msg = "❌ 対象となるメンバーがいませんでした。"
-            if skipped_names:
-                msg += f"\n(除外されたメンバー: {', '.join(skipped_names)})"
-            return await interaction.followup.send(msg, ephemeral=True)
-
-        success_members = []
-        error_logs = []
-        month_tag = datetime.datetime.now().strftime("%Y-%m")
-
-        async with self.bot.get_db() as db:
-            try:
-                await db.execute("INSERT OR IGNORE INTO accounts (user_id, balance, total_earned) VALUES (0, 0, 0)")
-
-                for member in targets:
-                    if member.bot: continue
-                    
-                    try:
-                        if role not in member.roles:
-                            await member.add_roles(role, reason="面接通過コマンドによる付与")
-                        
-                        await db.execute("INSERT OR IGNORE INTO accounts (user_id, balance) VALUES (?, 0)", (member.id,))
-                        await db.execute(
-                            "UPDATE accounts SET balance = balance + ?, total_earned = total_earned + ? WHERE user_id = ?", 
-                            (amount, amount, member.id)
-                        )
-                        
-                        await db.execute(
-                            "INSERT INTO transactions (sender_id, receiver_id, amount, type, description, month_tag) VALUES (0, ?, ?, 'BONUS', ?, ?)",
-                            (member.id, amount, f"面接通過祝い: {role.name}", month_tag)
-                        )
-                        
-                        success_members.append(member)
-                        
-                    except discord.Forbidden:
-                        error_logs.append(f"⚠️ {member.display_name}: 権限不足でロールを付与できませんでした")
-                    except Exception as e:
-                        error_logs.append(f"❌ {member.display_name}: エラーが発生しました ({e})")
-                        logger.error(f"Interview Command Error [{member.id}]: {e}")
-                
-                await db.commit()
-
-            except Exception as db_err:
-                await db.rollback()
-                logger.error(f"Interview Transaction Error: {db_err}")
-                return await interaction.followup.send("❌ データベースエラーが発生しました。", ephemeral=True)
-
-        embed = discord.Embed(title="🌸 面接通過処理完了", color=discord.Color.pink())
-        embed.add_field(name="対象範囲", value=mode_text, inline=False)
-        embed.add_field(name="付与ロール", value=role.mention, inline=True)
-        embed.add_field(name="支給額", value=f"{amount:,} L", inline=True)
-        
-        result_text = f"✅ 成功: {len(success_members)}名"
-        if skipped_names:
-            result_text += f"\n⛔ 除外(説明者): {len(skipped_names)}名"
-            
-        embed.add_field(name="処理結果", value=result_text, inline=False)
-        if error_logs:
-            embed.add_field(name="エラーログ", value="\n".join(error_logs[:5]), inline=False)
-
-        await interaction.followup.send(embed=embed)
-
-        log_ch_id = None
-        async with self.bot.get_db() as db:
-            async with db.execute("SELECT value FROM server_config WHERE key = 'interview_log_id'") as c:
-                row = await c.fetchone()
-                if row: log_ch_id = int(row['value'])
-
-        if log_ch_id:
-            channel = self.bot.get_channel(log_ch_id)
-            if channel:
-                log_embed = discord.Embed(title="面接通過 一括結果", color=0xFFD700, timestamp=datetime.datetime.now())
-                log_embed.add_field(name="実行者", value=interaction.user.mention, inline=False)
-                log_embed.add_field(name="対象数", value=f"{len(targets)}名", inline=True)
-                log_embed.add_field(name="成功", value=f"{len(success_members)}名", inline=True)
-                log_embed.add_field(name="付与ロール", value=role.mention, inline=False)
-                log_embed.add_field(name="付与額", value=f"{amount:,} Ru", inline=False)
-                
-                success_text = "\n".join([f"・{m.mention} ({m.display_name})" for m in success_members])
-                if len(success_text) > 1000:
-                    success_text = success_text[:950] + "\n...他多数"
-                
-                if success_text:
-                    log_embed.add_field(name="✅ 合格者一覧", value=success_text, inline=False)
-                
-                if skipped_names:
-                    log_embed.add_field(name="⛔ スキップ(説明者等)", value=", ".join(skipped_names), inline=False)
-                
-                if error_logs:
-                    log_embed.add_field(name="⚠️ エラー", value="\n".join(error_logs[:5]), inline=False)
-
-                await channel.send(embed=log_embed)
 
 
 # --- 1行サイコロ ---
@@ -2560,7 +2419,221 @@ class ServerStats(commands.Cog):
         except Exception as e:
             logger.error(f"Economy Report Error: {e}")
             await interaction.followup.send(f"❌ レポート生成中にエラーが発生しました: {e}")
+# --- Cog: InterviewSystem (カスタム絵文字分岐版) ---
+class InterviewSystem(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
 
+    # ▼ リアクション検知：設定された絵文字が押されたか判定 ▼
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload):
+        if payload.member.bot: return
+
+        # DBから設定を全読み込み
+        async with self.bot.get_db() as db:
+            async with db.execute("SELECT key, value FROM server_config") as c:
+                rows = await c.fetchall()
+                config = {row['key']: row['value'] for row in rows}
+
+        eval_channel_id = int(config.get('eval_channel_id', 0))
+        if payload.channel_id != eval_channel_id: return
+
+        # 押された絵文字とスロットのマッチング
+        # 例: { "⚔️": 1, "🛡️": 2 } というマップを作る
+        emoji_slot_map = {}
+        for i in range(1, 6):
+            e = config.get(f"branch_{i}_emoji")
+            if e:
+                emoji_slot_map[e] = i
+
+        # リアクションされた絵文字 (str(payload.emoji)で文字化)
+        clicked_emoji = str(payload.emoji)
+        
+        # マップにあるか確認
+        if clicked_emoji not in emoji_slot_map: return
+        
+        selected_slot = emoji_slot_map[clicked_emoji]
+        target_role_id = int(config.get(f"branch_{selected_slot}_role", 0))
+        probation_role_id = int(config.get('probation_role_id', 0))
+
+        if target_role_id == 0: return
+
+        channel = self.bot.get_channel(payload.channel_id)
+        try:
+            message = await channel.fetch_message(payload.message_id)
+        except:
+            return
+
+        # パネル判定
+        if not message.author.bot or not message.embeds: return
+        embed = message.embeds[0]
+        if "評価期間管理パネル" not in (embed.title or ""): return
+        if "【処理完了】" in (embed.footer.text or ""): return
+
+        guild = self.bot.get_guild(payload.guild_id)
+        target_role = guild.get_role(target_role_id)
+        probation_role = guild.get_role(probation_role_id)
+        
+        if not target_role: return
+
+        # 対象者抽出
+        target_members = []
+        if embed.fields:
+            mentions_text = embed.fields[0].value
+            import re
+            user_ids = re.findall(r'<@!?(\d+)>', mentions_text)
+            for uid in user_ids:
+                m = guild.get_member(int(uid))
+                if m: target_members.append(m)
+
+        if not target_members: return
+
+        # --- 昇格処理 ---
+        log_text = []
+        for member in target_members:
+            try:
+                await member.add_roles(target_role, reason=f"評価ルート選択: {clicked_emoji}")
+                if probation_role and probation_role in member.roles:
+                    await member.remove_roles(probation_role, reason="昇格のため削除")
+                log_text.append(f"✅ {member.display_name}")
+            except Exception as e:
+                log_text.append(f"❌ {member.display_name}")
+
+        # パネル更新
+        new_embed = embed.copy()
+        new_embed.color = target_role.color
+        new_embed.add_field(name=f"結果: {clicked_emoji} {target_role.name}", value="\n".join(log_text), inline=False)
+        new_embed.set_footer(text=f"【処理完了】実行者: {payload.member.display_name}")
+        
+        await message.edit(embed=new_embed)
+        await message.clear_reactions() 
+        await channel.send(f"▶ {len(target_members)}名を **{target_role.name}** へ昇格させました。", delete_after=10)
+
+
+    # ▼ 面接コマンド (カスタム絵文字パネル作成) ▼
+    @app_commands.command(name="面接通過", description="ユーザーにロールと資金を付与し、分岐評価パネルを作成します")
+    @app_commands.describe(
+        amount="初期付与額",
+        target="対象ユーザー（指定なし＝同VC全員）"
+    )
+    @has_permission("ADMIN")
+    async def pass_interview(
+        self, 
+        interaction: discord.Interaction, 
+        amount: int = 10000, 
+        target: Optional[discord.Member] = None
+    ):
+        await interaction.response.defer()
+
+        # 設定読み込み
+        eval_channel_id = None
+        probation_role_id = None
+        branches = {} # {slot_num: {"emoji": "⚔️", "desc": "戦士"}}
+
+        async with self.bot.get_db() as db:
+            async with db.execute("SELECT key, value FROM server_config") as cursor:
+                async for row in cursor:
+                    k, v = row['key'], row['value']
+                    if k == 'exclude_role_id': exclude_role_id = int(v) if v else None
+                    elif k == 'eval_channel_id': eval_channel_id = int(v) if v else None
+                    elif k == 'probation_role_id': probation_role_id = int(v) if v else None
+                    
+                    # 分岐設定の読み込み branch_1_desc, branch_1_emoji
+                    elif k.startswith('branch_'):
+                        parts = k.split('_') # ['branch', '1', 'desc']
+                        if len(parts) == 3:
+                            slot = int(parts[1])
+                            type_key = parts[2] # 'desc' or 'emoji' or 'role'
+                            if slot not in branches: branches[slot] = {}
+                            branches[slot][type_key] = v
+
+        role = interaction.guild.get_role(probation_role_id) if probation_role_id else None
+        if not role or not eval_channel_id:
+            return await interaction.followup.send("⚠️ 先に `/評価ログ設定` と `/評価ルート設定` を行ってください。", ephemeral=True)
+
+        # --- 対象者特定 ---
+        targets = []
+        if target:
+            targets.append(target)
+            mode_text = f"{target.mention} を"
+        else:
+            if interaction.user.voice and interaction.user.voice.channel:
+                channel = interaction.user.voice.channel
+                for m in channel.members:
+                    if exclude_role_id and any(r.id == exclude_role_id for r in m.roles): continue
+                    targets.append(m)
+                mode_text = f"VC **{channel.name}** のメンバー"
+            else:
+                return await interaction.followup.send("❌ 対象を指定するか、VCに参加してください。", ephemeral=True)
+
+        if not targets: return await interaction.followup.send("❌ 対象がいませんでした。", ephemeral=True)
+
+        # --- 付与処理 ---
+        success_members = []
+        month_tag = datetime.datetime.now().strftime("%Y-%m")
+        
+        async with self.bot.get_db() as db:
+            try:
+                for member in targets:
+                    if member.bot: continue
+                    try:
+                        if role not in member.roles: await member.add_roles(role)
+                        await db.execute("INSERT OR IGNORE INTO accounts (user_id, balance, total_earned) VALUES (?, 0, 0)", (member.id,))
+                        await db.execute("UPDATE accounts SET balance = balance + ? WHERE user_id = ?", (amount, member.id))
+                        await db.execute("INSERT INTO transactions (sender_id, receiver_id, amount, type, description, month_tag) VALUES (0, ?, ?, 'BONUS', ?, ?)", 
+                                         (member.id, amount, f"面接通過: {role.name}", month_tag))
+                        success_members.append(member)
+                    except: pass
+                await db.commit()
+            except: pass
+
+        # 結果報告
+        embed = discord.Embed(title="🌸 面接通過処理完了", color=discord.Color.pink())
+        embed.add_field(name="対象", value=mode_text, inline=False)
+        embed.add_field(name="成功", value=f"{len(success_members)}名", inline=True)
+        await interaction.followup.send(embed=embed)
+
+        # ▼ カスタムパネル作成 ▼
+        eval_channel = self.bot.get_channel(eval_channel_id)
+        if success_members and eval_channel:
+            mentions = "\n".join([f"・{m.mention} ({m.display_name})" for m in success_members])
+            today_str = datetime.datetime.now().strftime("%Y/%m/%d")
+            
+            # 分岐リスト作成
+            branch_text = ""
+            reactions_to_add = []
+            
+            # 1~5のスロットを確認
+            for i in range(1, 6):
+                if i in branches:
+                    b_data = branches[i]
+                    emoji = b_data.get('emoji')
+                    desc = b_data.get('desc', '説明なし')
+                    
+                    if emoji:
+                        branch_text += f"{emoji} : {desc}\n"
+                        reactions_to_add.append(emoji)
+            
+            if not branch_text: branch_text = "（ルート設定がありません）"
+
+            panel_embed = discord.Embed(
+                title="📋 評価期間管理パネル",
+                description=f"**{today_str}** 面接通過。\n評価期間終了後、該当するリアクションを押して配属先を決定してください。",
+                color=0x3498db
+            )
+            panel_embed.add_field(name="対象メンバー", value=mentions, inline=False)
+            panel_embed.add_field(name="現在のロール", value=role.mention, inline=True)
+            panel_embed.add_field(name="⏬ 配属先選択", value=branch_text, inline=False)
+            panel_embed.set_footer(text="未処理 | 管理者のみ操作可能")
+            
+            msg = await eval_channel.send(embed=panel_embed)
+            
+            # 設定された絵文字だけリアクションする
+            for reaction in reactions_to_add:
+                try:
+                    await msg.add_reaction(reaction)
+                except Exception as e:
+                    logger.error(f"Reaction Error: {e} (Emoji: {reaction})")
 
 class ShopPurchaseView(discord.ui.View):
     def __init__(self, bot, role_id, price, shop_id):
@@ -2821,7 +2894,38 @@ class ShopSystem(commands.Cog):
 class AdminTools(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-
+    @app_commands.command(name="評価ルート設定", description="【最高神】評価完了後の「分岐先ロール」と「対応する絵文字」を設定します")
+    @app_commands.describe(
+        slot="設定するスロット番号 (1~5)",
+        role="その絵文字を押した時に付与するロール",
+        emoji="ボタンとして使う絵文字",
+        description="ルートの説明（例: 天使へ）"
+    )
+    @app_commands.choices(slot=[
+        app_commands.Choice(name="スロット1", value=1),
+        app_commands.Choice(name="スロット2", value=2),
+        app_commands.Choice(name="スロット3", value=3),
+        app_commands.Choice(name="スロット4", value=4),
+        app_commands.Choice(name="スロット5", value=5),
+    ])
+    @has_permission("SUPREME_GOD")
+    async def config_eval_branch(self, interaction: discord.Interaction, slot: int, role: discord.Role, emoji: str, description: str):
+        await interaction.response.defer(ephemeral=True)
+        
+        # データベースに保存 (絵文字も保存するように追加)
+        async with self.bot.get_db() as db:
+            await db.execute("INSERT OR REPLACE INTO server_config (key, value) VALUES (?, ?)", (f"branch_{slot}_role", str(role.id)))
+            await db.execute("INSERT OR REPLACE INTO server_config (key, value) VALUES (?, ?)", (f"branch_{slot}_emoji", emoji))
+            await db.execute("INSERT OR REPLACE INTO server_config (key, value) VALUES (?, ?)", (f"branch_{slot}_desc", description))
+            await db.commit()
+            
+        await interaction.followup.send(
+            f"✅ **スロット{slot}** を設定しました。\n"
+            f"ボタン: {emoji}\n"
+            f"ロール: {role.mention}\n"
+            f"説明: {description}", 
+            ephemeral=True
+        )
     @app_commands.command(name="ログ出力先決定", description="各ログの出力先を設定します")
     @app_commands.choices(log_type=[
         discord.app_commands.Choice(name="通貨ログ (送金など)", value="currency_log_id"),
