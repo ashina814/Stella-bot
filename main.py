@@ -3146,7 +3146,7 @@ class CestaBankBot(commands.Bot):
         await self.tree.sync()
         logger.info("StellaBank System: Setup complete and All Cogs Synced.")
 
-    async def send_bank_log(self, log_key: str, embed: discord.Embed):
+async def send_bank_log(self, log_key: str, embed: discord.Embed):
         """
         指定されたキー（currency_log_id, salary_log_id 等）の設定を読み込み、
         対応するチャンネルへログを送信します。
@@ -3163,7 +3163,7 @@ class CestaBankBot(commands.Bot):
                     except Exception as e:
                         logger.error(f"Log Send Error ({log_key}): {e}")
 
-@tasks.loop(hours=24)
+    @tasks.loop(hours=24)
     async def backup_db_task(self):
         import datetime
         backup_name = f"backup_{datetime.datetime.now().strftime('%Y%m%d')}.db"
@@ -3178,7 +3178,7 @@ class CestaBankBot(commands.Bot):
     async def on_ready(self):
         print(f"Logged in as {self.user} (ID: {self.user.id})")
         print("--- Stella Bank System Online ---")
-
+        
 # --- 実行ブロック ---
 if __name__ == "__main__":
     if not TOKEN:
