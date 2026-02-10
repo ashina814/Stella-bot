@@ -426,7 +426,7 @@ class PrivateVCManager(commands.Cog):
     async def before_check(self):
         await self.bot.wait_until_ready()
 
-    @app_commands.command(name="一時vcパネル作成", description="【管理者】内容をカスタマイズしてVC作成パネルを設置します")
+    @app_commands.command(name="一時vcパネル作成", description="内容をカスタマイズしてVC作成パネルを設置します")
     @app_commands.describe(
         title="パネルのタイトル",
         description="パネルの説明文（\\nで改行）",
@@ -588,7 +588,7 @@ class Economy(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @app_commands.command(name="ping", description="【管理者】Botの応答速度を確認します")
+    @app_commands.command(name="ping", description="Botの応答速度を確認します")
     @has_permission("ADMIN")
     async def ping(self, interaction: discord.Interaction):
         latency = round(self.bot.latency * 1000)
@@ -689,7 +689,7 @@ class Salary(commands.Cog):
         msg = "✅ 今後、給与明細は **DMで通知されます**。" if status == 1 else "🔕 今後、給与明細の **DM通知は行われません**。"
         await interaction.response.send_message(msg, ephemeral=True)
 
-    @app_commands.command(name="一括給与", description="【最高神】全役職の給与を合算支給し、明細をDM送信します")
+    @app_commands.command(name="一括給与", description="全役職の給与を合算支給し、明細をDM送信します")
     @has_permission("SUPREME_GOD")
     async def distribute_all(self, interaction: discord.Interaction):
         # 処理が長引く可能性があるため、タイムアウトを回避（最大15分猶予）
@@ -1114,7 +1114,7 @@ class Jackpot(commands.Cog):
 
         await interaction.followup.send(content="@everyone", embed=embed)
 
-    @app_commands.command(name="ジャックポット設定", description="【管理者】スポンサーを設定(売上10%還元 / 当選時100万徴収)")
+    @app_commands.command(name="ジャックポット設定", description="スポンサーを設定(売上10%還元 / 当選時100万徴収)")
     @app_commands.default_permissions(administrator=True)
     async def set_sponsor(self, interaction: discord.Interaction, user: discord.User):
         async with self.bot.get_db() as db:
@@ -1124,7 +1124,7 @@ class Jackpot(commands.Cog):
             """, (str(user.id), str(user.id)))
             await db.commit()
         
-        await interaction.response.send_message(f"✅ ジャックポットのスポンサーを {user.mention} (滝) に設定しました。\n・チケット売上の**10%**が還元されます。\n・当選者が出た場合、**100万Stell**が徴収されます。", ephemeral=True)
+        await interaction.response.send_message(f"✅ ジャックポットのスポンサーを {user.mention} (Tama) に設定しました。\n・チケット売上の**10%**が還元されます。\n・当選者が出た場合、**100万Stell**が徴収されます。", ephemeral=True)
 
 
 # --- 色定義 ---
@@ -1249,7 +1249,7 @@ class VoiceSystem(commands.Cog):
             logger.error(f"Failed to load voice config: {e}")
 
     # インフレ対策コマンド: 報酬レートの変更
-    @app_commands.command(name="vc報酬レート設定", description="【管理者】VC報酬の基本レート(1分あたり)を変更します")
+    @app_commands.command(name="vc報酬レート設定", description="VC報酬の基本レート(1分あたり)を変更します")
     @has_permission("ADMIN")
     async def set_vc_rate(self, interaction: discord.Interaction, amount: int):
         if amount < 0: return await interaction.response.send_message("❌ 0以上にしてください。", ephemeral=True)
@@ -1364,7 +1364,7 @@ class VoiceHistory(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @app_commands.command(name="vc記録", description="【女神以上】指定したユーザーのVC累計滞在時間を画像で表示します")
+    @app_commands.command(name="vc記録", description="指定したユーザーのVC累計滞在時間を画像で表示します")
     @app_commands.describe(member="確認したいユーザー")
     @has_permission("GODDESS")
     async def vc_history(self, interaction: discord.Interaction, member: discord.Member):
@@ -1543,7 +1543,7 @@ class Chinchiro(commands.Cog):
         if dice == [1, 1, 1]: return dice, 111, "【極】ピンゾロ", 5, "🔥 神 降 臨 🔥", True
         if dice[0] == dice[1] == dice[2]: return dice, 100 + dice[0], f"嵐 ({dice[0]})", 3, "💪 激 強", True
         if dice == [4, 5, 6]: return dice, 90, "シゴロ (4-5-6)", 2, "✨ 勝利確定", False
-        if dice == [1, 2, 3]: return dice, -1, "ヒフミ (1-2-3)", -2, "💩 倍 払 い", False
+        if dice == [1, 2, 3]: return dice, -1, "ヒフミ (1-2-3)", -2, " 倍 払 い", False
         
         if dice[0] == dice[1]: return dice, dice[2], f"{dice[2]} の目", 1, "😐 通 常", False
         if dice[1] == dice[2]: return dice, dice[0], f"{dice[0]} の目", 1, "😐 通 常", False
@@ -2085,7 +2085,7 @@ class Slot(commands.Cog):
         )
         return screen
 
-    @app_commands.command(name="スロット設定", description="【管理者】スロットの設定を変更します")
+    @app_commands.command(name="スロット設定", description="スロットの設定を変更します")
     @app_commands.describe(mode="設定値 (1-6, L)")
     @app_commands.default_permissions(administrator=True)
     async def config_slot(self, interaction: discord.Interaction, mode: str):
@@ -2099,6 +2099,7 @@ class Slot(commands.Cog):
     @app_commands.describe(bet="賭け金 (100 Stell 〜)")
     async def slot(self, interaction: discord.Interaction, bet: int):
         if bet < 100: return await interaction.response.send_message("100Stellから。", ephemeral=True)
+        if bet > 200000:return await interaction.response.send_message("…熱くなりすぎよ。賭け金は 200,000 Stell までにしておきなさい。", ephemeral=True)
 
         now = datetime.datetime.now()
         last_time = self.last_played.get(interaction.user.id)
@@ -2364,7 +2365,7 @@ class ServerStats(commands.Cog):
         except Exception as e:
             logger.error(f"Daily Log Error: {e}")
 
-    @app_commands.command(name="経済グラフ", description="【管理者】サーバー経済の健全性・格差・GDPを分析したレポートを発行します")
+    @app_commands.command(name="経済グラフ", description="サーバー経済の健全性・格差・GDPを分析したレポートを発行します")
     @has_permission("ADMIN")
     async def economy_graph(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -2662,7 +2663,7 @@ class ShopSystem(commands.Cog):
 
 
     # ▼▼▼ 1. 商品登録 ▼▼▼
-    @app_commands.command(name="ショップ_商品登録", description="【最高神】ショップにロールを出品します")
+    @app_commands.command(name="ショップ_商品登録", description="ショップにロールを出品します")
     @app_commands.rename(shop_id="ショップid", role="商品ロール", price="価格", description="説明文")
     @app_commands.describe(
         shop_id="配置するショップのID（例: main, dark など。好きな英数字）",
@@ -2695,7 +2696,7 @@ class ShopSystem(commands.Cog):
 
 
     # ▼▼▼ 2. 商品削除 ▼▼▼
-    @app_commands.command(name="ショップ_商品削除", description="【最高神】ショップから商品を取り下げます")
+    @app_commands.command(name="ショップ_商品削除", description="ショップから商品を取り下げます")
     @app_commands.rename(shop_id="ショップid", role="削除ロール")
     @app_commands.describe(shop_id="削除したい商品があるショップID", role="削除するロール")
     @has_permission("SUPREME_GOD")
@@ -2708,7 +2709,7 @@ class ShopSystem(commands.Cog):
 
 
     # ▼▼▼ 3. パネル設置 ▼▼▼
-    @app_commands.command(name="ショップ_パネル設置", description="【最高神】指定したIDのショップパネルを設置します")
+    @app_commands.command(name="ショップ_パネル設置", description="指定したIDのショップパネルを設置します")
     @app_commands.rename(shop_id="ショップid", title="タイトル", content="本文", image_url="画像url")
     @app_commands.describe(
         shop_id="表示するショップID（登録時に決めたもの）", 
@@ -2759,7 +2760,7 @@ class AdminTools(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @app_commands.command(name="評価ルート設定", description="【最高神】評価完了後の「分岐先ロール」と「対応する絵文字」を設定します")
+    @app_commands.command(name="評価ルート設定", description="評価完了後の「分岐先ロール」と「対応する絵文字」を設定します")
     @app_commands.describe(
         slot="設定するスロット番号 (1~5)",
         role="その絵文字を押した時に付与するロール",
@@ -2792,7 +2793,7 @@ class AdminTools(commands.Cog):
             ephemeral=True
         )
 
-    @app_commands.command(name="評価ログ設定", description="【最高神】評価パネルを送信するチャンネルと、剥奪する仮ロールを設定します")
+    @app_commands.command(name="評価ログ設定", description="評価パネルを送信するチャンネルと、剥奪する仮ロールを設定します")
     @app_commands.describe(
         channel="パネルを送りたい管理者用チャンネル",
         probation_role="面接時に付与し、昇格時に削除する仮ロール（研修生など）"
@@ -2822,6 +2823,8 @@ class AdminTools(commands.Cog):
         discord.app_commands.Choice(name="給与ログ (一斉支給)", value="salary_log_id"),
         discord.app_commands.Choice(name="面接ログ (合格通知)", value="interview_log_id")
     ])
+        discord.app_commands.Choice(name="チャット削除ログ", value="chat_log_id") 
+    ])
     @has_permission("SUPREME_GOD")
     async def config_log_channel(self, interaction: discord.Interaction, log_type: str, channel: discord.TextChannel):
         await interaction.response.defer(ephemeral=True)
@@ -2831,7 +2834,7 @@ class AdminTools(commands.Cog):
         await self.bot.config.reload()
         await interaction.followup.send(f"✅ **{channel.mention}** をログ出力先に設定しました。", ephemeral=True)
 
-    @app_commands.command(name="面接の除外ロール設定", description="【最高神】面接コマンドでスキップするロール（説明者など）を設定")
+    @app_commands.command(name="面接の除外ロール設定", description="面接コマンドでスキップするロール（説明者など）を設定")
     @has_permission("SUPREME_GOD")
     async def config_exclude_role(self, interaction: discord.Interaction, role: discord.Role):
         await interaction.response.defer(ephemeral=True)
@@ -2857,7 +2860,7 @@ class AdminTools(commands.Cog):
         await self.bot.config.reload()
         await interaction.followup.send(f"✅ {role.mention} を `{level}` に設定しました。", ephemeral=True)
 
-    @app_commands.command(name="給与額設定", description="【最高神】役職ごとの給与額を設定します")
+    @app_commands.command(name="給与額設定", description="役職ごとの給与額を設定します")
     @has_permission("SUPREME_GOD")
     async def config_set_wage(self, interaction: discord.Interaction, role: discord.Role, amount: int):
         await interaction.response.defer(ephemeral=True)
@@ -2867,7 +2870,7 @@ class AdminTools(commands.Cog):
         await self.bot.config.reload()
         await interaction.followup.send(f"✅ 設定を更新しました。", ephemeral=True)
 
-    @app_commands.command(name="vc報酬追加", description="【最高神】報酬対象のVCを追加します")
+    @app_commands.command(name="vc報酬追加", description="報酬対象のVCを追加します")
     @has_permission("SUPREME_GOD")
     async def add_reward_vc(self, interaction: discord.Interaction, channel: discord.VoiceChannel):
         await interaction.response.defer(ephemeral=True)
@@ -2879,7 +2882,7 @@ class AdminTools(commands.Cog):
         if vc_cog: await vc_cog.reload_targets()
         await interaction.followup.send(f"✅ {channel.mention} を報酬対象に追加しました。", ephemeral=True)
 
-    @app_commands.command(name="vc報酬解除", description="【最高神】報酬対象のVCを解除します")
+    @app_commands.command(name="vc報酬解除", description="報酬対象のVCを解除します")
     @has_permission("SUPREME_GOD")
     async def remove_reward_vc(self, interaction: discord.Interaction, channel: discord.VoiceChannel):
         await interaction.response.defer(ephemeral=True)
@@ -2891,7 +2894,7 @@ class AdminTools(commands.Cog):
         if vc_cog: await vc_cog.reload_targets()
         await interaction.followup.send(f"🗑️ {channel.mention} を報酬対象から除外しました。", ephemeral=True)
 
-    @app_commands.command(name="vc報酬リスト", description="【最高神】報酬対象のVC一覧を表示します")
+    @app_commands.command(name="vc報酬リスト", description="報酬対象のVC一覧を表示します")
     @has_permission("SUPREME_GOD")
     async def list_reward_vcs(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -2904,7 +2907,7 @@ class AdminTools(commands.Cog):
         embed = discord.Embed(title="🎙 報酬対象VC一覧", description=channels_text, color=discord.Color.green())
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="経済集計ロール付与", description="【最高神】経済統計の対象とする「市民ロール」を設定します")
+    @app_commands.command(name="経済集計ロール付与", description="経済統計の対象とする「市民ロール」を設定します")
     @has_permission("SUPREME_GOD")
     async def config_citizen_role(self, interaction: discord.Interaction, role: discord.Role):
         await interaction.response.defer(ephemeral=True)
@@ -2914,7 +2917,7 @@ class AdminTools(commands.Cog):
         await self.bot.config.reload()
         await interaction.followup.send(f"✅ 経済統計の対象を **{role.name}** を持つメンバーに限定しました。", ephemeral=True)
 
-    @app_commands.command(name="経済集計アクティブ判定期間", description="【最高神】経済統計に含める「アクティブ期間（日数）」を設定します")
+    @app_commands.command(name="経済集計アクティブ判定期間", description="経済統計に含める「アクティブ期間（日数）」を設定します")
     @app_commands.describe(days="この日数以内に取引がない人は、市民ロールを持っていても計算から除外されます（推奨: 30）")
     @has_permission("SUPREME_GOD")
     async def config_active_days(self, interaction: discord.Interaction, days: int):
@@ -2928,13 +2931,54 @@ class AdminTools(commands.Cog):
         await self.bot.config.reload()
         await interaction.followup.send(f"✅ 過去 **{days}日間** に取引がないメンバーを、経済統計から除外するように設定しました。", ephemeral=True)
 
+# --- Cog: MessageLogger (削除ログ) ---
+class MessageLogger(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+    @commands.Cog.listener()
+    async def on_message_delete(self, message):
+        # Botのメッセージや、内容がない（システムメッセージ等）は無視
+        if message.author.bot or not message.guild: return
+
+        # ログ出力先チャンネルを取得
+        log_channel_id = None
+        async with self.bot.get_db() as db:
+            async with db.execute("SELECT value FROM server_config WHERE key = 'chat_log_id'") as c:
+                row = await c.fetchone()
+                if row: log_channel_id = int(row['value'])
+
+        if not log_channel_id: return
+        
+        channel = self.bot.get_channel(log_channel_id)
+        if not channel: return
+
+        # Embedを作成
+        embed = discord.Embed(title="🗑️ メッセージ削除ログ", color=discord.Color.red(), timestamp=datetime.datetime.now())
+        embed.set_author(name=f"{message.author.display_name} ({message.author.id})", icon_url=message.author.display_avatar.url)
+        embed.add_field(name="場所", value=message.channel.mention, inline=True)
+        
+        # 内容（長すぎる場合は省略）
+        content = message.content
+        if not content: content = "（画像または埋め込みのみ）"
+        if len(content) > 1000: content = content[:1000] + "..."
+        
+        embed.add_field(name="内容", value=content, inline=False)
+
+        # 添付ファイルがあればURLを表示
+        if message.attachments:
+            files = "\n".join([a.url for a in message.attachments])
+            embed.add_field(name="添付ファイル", value=files, inline=False)
+
+        await channel.send(embed=embed)
+
 
 # --- 修正・追加: InterviewSystem (VC一括処理版) ---
 class InterviewSystem(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @app_commands.command(name="面接合格", description="【管理者】VC内のメンバーを合格させ、ロール変更と祝金を付与します")
+    @app_commands.command(name="面接合格", description="VC内のメンバーを合格させ、ロール変更と祝金を付与します")
     @app_commands.describe(
         target_role="変更前のロール (研修生など)",
         new_role="変更後のロール (正会員など)"
@@ -3085,7 +3129,8 @@ class CestaBankBot(commands.Bot):
         await self.add_cog(AdminTools(self))
         await self.add_cog(ServerStats(self))
         await self.add_cog(ShopSystem(self))
-        
+
+        await self.add_cog(MessageLogger(self))
         await self.add_cog(VoiceSystem(self))
         await self.add_cog(PrivateVCManager(self))
         await self.add_cog(VoiceHistory(self))
@@ -3119,13 +3164,14 @@ class CestaBankBot(commands.Bot):
                     except Exception as e:
                         logger.error(f"Log Send Error ({log_key}): {e}")
 
-    @tasks.loop(hours=24)
+@tasks.loop(hours=24)
     async def backup_db_task(self):
-        import shutil
         import datetime
         backup_name = f"backup_{datetime.datetime.now().strftime('%Y%m%d')}.db"
         try:
-            shutil.copy2(self.db_path, backup_name)
+            async with self.get_db() as db:
+                await db.execute(f"VACUUM INTO '{backup_name}'")
+            
             logger.info(f"Auto Backup Success: {backup_name}")
         except Exception as e:
             logger.error(f"Backup Failure: {e}")
