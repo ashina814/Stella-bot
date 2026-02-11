@@ -4,7 +4,6 @@ import matplotlib
 matplotlib.use('Agg') # サーバー上でグラフを描くための設定
 import matplotlib.pyplot as plt
 import io
-import pandas as pd
 from discord.ext import commands, tasks
 from discord import app_commands, ui
 import aiosqlite
@@ -3475,7 +3474,7 @@ class CestaBankBot(commands.Bot):
         await self.add_cog(AdminTools(self))
         await self.add_cog(ServerStats(self))
         await self.add_cog(ShopSystem(self))
-        await self.add_cog(StockControlView(self))
+        await self.add_cog(HumanStockMarket(self))
 
         await self.add_cog(MessageLogger(self))
         await self.add_cog(VoiceSystem(self))
