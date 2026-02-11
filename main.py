@@ -2296,6 +2296,293 @@ class Slot(commands.Cog):
             traceback.print_exc()
             await interaction.followup.send(f"❌ エラー: `{e}`", ephemeral=True)
 
+# ==========================================
+#  軽量・高機能版: 人間株式市場 (1GB環境最適化)
+# ==========================================
+
+class StockControlView(discord.ui.View):
+    def __init__(self, cog, target_user: discord.Member):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.target = target_user
+
+    async def update_embed(self, interaction: discord.Interaction):
+        # 最新情報を取得
+        async with self.cog.bot.get_db() as db:
+            async with db.execute("SELECT total_shares FROM stock_issuers WHERE user_id = ?", (self.target.id,)) as c:
+                row = await c.fetchone()
+                if not row: return None 
+                shares = row['total_shares']
+            
+            async with db.execute("SELECT amount, avg_cost FROM stock_holdings WHERE user_id = ? AND issuer_id = ?", (interaction.user.id, self.target.id)) as c:
+                holding = await c.fetchone()
+                my_amount = holding['amount'] if holding else 0
+                my_avg = holding['avg_cost'] if holding else 0
+
+        current_price = self.cog.calculate_price(shares)
+        
+        # 損益計算
+        total_val = current_price * my_amount
+        profit = total_val - (my_avg * my_amount)
+        color = 0x00ff00 if profit >= 0 else 0xff0000
+        sign = "+" if profit >= 0 else ""
+        
+        embed = discord.Embed(title=f"📈 {self.target.display_name} の銘柄情報", color=color)
+        embed.set_thumbnail(url=self.target.display_avatar.url)
+        embed.description = "ボタンで売買できます（手数料: 10%）"
+        
+        embed.add_field(name="💰 株価", value=f"**{current_price:,} S**", inline=True)
+        embed.add_field(name="🏢 発行数", value=f"{shares:,} 株", inline=True)
+        embed.add_field(name="配当", value="🗣️ 発言で発生", inline=True)
+        
+        embed.add_field(name="──────────", value="**あなたの保有**", inline=False)
+        embed.add_field(name="🎒 保有数", value=f"{my_amount:,} 株", inline=True)
+        embed.add_field(name="📊 損益", value=f"**{sign}{int(profit):,} S**", inline=True)
+        
+        return embed
+
+    @discord.ui.button(label="買う(1)", style=discord.ButtonStyle.success, emoji="🛒", row=0)
+    async def buy_one(self, interaction, button): await self._trade(interaction, "buy", 1)
+
+    @discord.ui.button(label="買う(10)", style=discord.ButtonStyle.success, emoji="📦", row=0)
+    async def buy_ten(self, interaction, button): await self._trade(interaction, "buy", 10)
+
+    @discord.ui.button(label="売る(1)", style=discord.ButtonStyle.danger, emoji="💸", row=1)
+    async def sell_one(self, interaction, button): await self._trade(interaction, "sell", 1)
+
+    @discord.ui.button(label="全売却", style=discord.ButtonStyle.danger, emoji="💥", row=1)
+    async def sell_all(self, interaction, button):
+        async with self.cog.bot.get_db() as db:
+            async with db.execute("SELECT amount FROM stock_holdings WHERE user_id = ? AND issuer_id = ?", (interaction.user.id, self.target.id)) as c:
+                row = await c.fetchone()
+                amount = row['amount'] if row else 0
+        if amount > 0: await self._trade(interaction, "sell", amount)
+        else: await interaction.response.send_message("株を持っていません。", ephemeral=True)
+
+    @discord.ui.button(label="更新", style=discord.ButtonStyle.secondary, emoji="🔄", row=1)
+    async def refresh(self, interaction, button):
+        new_embed = await self.update_embed(interaction)
+        if new_embed: await interaction.response.edit_message(embed=new_embed, view=self)
+
+    async def _trade(self, interaction, type, amount):
+        if type == "buy": msg, success = await self.cog.internal_buy(interaction.user, self.target, amount)
+        else: msg, success = await self.cog.internal_sell(interaction.user, self.target, amount)
+        
+        if success:
+            new_embed = await self.update_embed(interaction)
+            await interaction.response.edit_message(embed=new_embed, view=self)
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+
+
+class HumanStockMarket(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        # --- 市場設定 ---
+        self.base_price = 100   
+        self.slope = 10         
+        self.trading_fee = 0.10 # 手数料10% (配当原資のため高め推奨)
+        self.issuer_fee = 0.05  
+        
+        # --- 配当設定 ---
+        self.dividend_rate = 5  # 1株あたりの配当額
+        self.dividend_prob = 10 # 1/10の確率
+        
+        # --- 【軽量化】配当バッファ ---
+        self.dividend_buffer = {} 
+        self.buffer_flush_task.start()
+
+    def cog_unload(self):
+        self.buffer_flush_task.cancel()
+
+    def calculate_price(self, shares):
+        return self.base_price + (shares * self.slope)
+
+    async def init_market_db(self):
+        async with self.bot.get_db() as db:
+            await db.execute("CREATE TABLE IF NOT EXISTS stock_issuers (user_id INTEGER PRIMARY KEY, total_shares INTEGER DEFAULT 0, is_listed INTEGER DEFAULT 1)")
+            await db.execute("CREATE TABLE IF NOT EXISTS stock_holdings (user_id INTEGER, issuer_id INTEGER, amount INTEGER, avg_cost REAL, PRIMARY KEY (user_id, issuer_id))")
+            await db.execute("CREATE TABLE IF NOT EXISTS market_config (key TEXT PRIMARY KEY, value TEXT)")
+            await db.commit()
+
+    # --- 【軽量化】配当イベント (メモリに貯めるだけ) ---
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        if message.author.bot or not message.guild: return
+        if random.randint(1, self.dividend_prob) != 1: return # 確率判定
+
+        # メモリ上に回数を記録するだけ (DBには書かない)
+        if message.author.id not in self.dividend_buffer:
+            self.dividend_buffer[message.author.id] = 0
+        self.dividend_buffer[message.author.id] += 1
+        
+        # リアクションで通知（任意）
+        try: await message.add_reaction("💰")
+        except: pass
+
+    # --- 【軽量化】定期書き込みタスク (1分に1回) ---
+    @tasks.loop(minutes=1)
+    async def buffer_flush_task(self):
+        if not self.dividend_buffer: return
+        
+        # バッファをコピーして空にする
+        buffer_copy = self.dividend_buffer.copy()
+        self.dividend_buffer.clear()
+        
+        async with self.bot.get_db() as db:
+            for issuer_id, count in buffer_copy.items():
+                # 上場チェック & 株主取得
+                async with db.execute("SELECT total_shares FROM stock_issuers WHERE user_id = ? AND is_listed = 1", (issuer_id,)) as c:
+                    if not await c.fetchone(): continue
+
+                async with db.execute("SELECT user_id, amount FROM stock_holdings WHERE issuer_id = ?", (issuer_id,)) as c:
+                    holders = await c.fetchall()
+                
+                if not holders: continue
+
+                # 配る金額計算 (回数分まとめて)
+                payout_per_share = self.dividend_rate * count
+                updates = []
+                system_out = 0
+                
+                for h in holders:
+                    pay = h['amount'] * payout_per_share
+                    if pay > 0:
+                        updates.append((pay, h['user_id']))
+                        system_out += pay
+                
+                if updates:
+                    await db.executemany("UPDATE accounts SET balance = balance + ? WHERE user_id = ?", updates)
+                    await db.execute("UPDATE accounts SET balance = balance + ? WHERE user_id = 0", (system_out,))
+            
+            await db.commit()
+
+    # --- 内部処理: 購入 (ボタン・コマンド共通) ---
+    async def internal_buy(self, buyer, target, amount):
+        if buyer.id == target.id: return ("❌ 自己売買は禁止です。", False)
+        
+        async with self.bot.get_db() as db:
+            async with db.execute("SELECT total_shares FROM stock_issuers WHERE user_id = ?", (target.id,)) as c:
+                row = await c.fetchone()
+                if not row: return ("❌ 上場していません。", False)
+                shares = row['total_shares']
+
+            unit_price = self.calculate_price(shares)
+            subtotal = unit_price * amount
+            fee = int(subtotal * self.trading_fee)
+            bonus = int(subtotal * self.issuer_fee)
+            total = subtotal + fee + bonus
+
+            async with db.execute("SELECT balance FROM accounts WHERE user_id = ?", (buyer.id,)) as c:
+                bal = await c.fetchone()
+                if not bal or bal['balance'] < total: return (f"❌ 資金不足 (必要: {total:,} S)", False)
+
+            try:
+                await db.execute("UPDATE accounts SET balance = balance - ? WHERE user_id = ?", (total, buyer.id))
+                await db.execute("UPDATE accounts SET balance = balance + ? WHERE user_id = ?", (bonus, target.id))
+                
+                async with db.execute("SELECT amount, avg_cost FROM stock_holdings WHERE user_id = ? AND issuer_id = ?", (buyer.id, target.id)) as c:
+                    h = await c.fetchone()
+                
+                if h:
+                    new_n = h['amount'] + amount
+                    new_avg = ((h['amount'] * h['avg_cost']) + subtotal) / new_n
+                    await db.execute("UPDATE stock_holdings SET amount = ?, avg_cost = ? WHERE user_id = ? AND issuer_id = ?", (new_n, new_avg, buyer.id, target.id))
+                else:
+                    await db.execute("INSERT INTO stock_holdings (user_id, issuer_id, amount, avg_cost) VALUES (?, ?, ?, ?)", (buyer.id, target.id, amount, unit_price))
+                
+                await db.execute("UPDATE stock_issuers SET total_shares = total_shares + ? WHERE user_id = ?", (amount, target.id))
+                
+                month = datetime.datetime.now().strftime("%Y-%m")
+                await db.execute("INSERT INTO transactions (sender_id, receiver_id, amount, type, description, month_tag) VALUES (?, ?, ?, 'STOCK_BUY', ?, ?)",
+                                 (buyer.id, 0, total, f"株購入: {target.display_name}", month))
+                await db.commit()
+                return (f"✅ 購入成功: {target.display_name} x{amount}株", True)
+            except Exception as e:
+                await db.rollback()
+                return (f"エラー: {e}", False)
+
+    # --- 内部処理: 売却 ---
+    async def internal_sell(self, seller, target, amount):
+        async with self.bot.get_db() as db:
+            async with db.execute("SELECT total_shares FROM stock_issuers WHERE user_id = ?", (target.id,)) as c:
+                row = await c.fetchone()
+                if not row: return ("❌ 上場していません。", False)
+                shares = row['total_shares']
+
+            async with db.execute("SELECT amount, avg_cost FROM stock_holdings WHERE user_id = ? AND issuer_id = ?", (seller.id, target.id)) as c:
+                h = await c.fetchone()
+                if not h or h['amount'] < amount: return ("❌ 保有数不足", False)
+
+            unit_price = self.calculate_price(shares)
+            revenue = unit_price * amount
+            
+            try:
+                new_n = h['amount'] - amount
+                if new_n == 0: await db.execute("DELETE FROM stock_holdings WHERE user_id = ? AND issuer_id = ?", (seller.id, target.id))
+                else: await db.execute("UPDATE stock_holdings SET amount = ? WHERE user_id = ? AND issuer_id = ?", (new_n, seller.id, target.id))
+                
+                await db.execute("UPDATE accounts SET balance = balance + ? WHERE user_id = ?", (revenue, seller.id))
+                await db.execute("UPDATE stock_issuers SET total_shares = total_shares - ? WHERE user_id = ?", (amount, target.id))
+                
+                month = datetime.datetime.now().strftime("%Y-%m")
+                await db.execute("INSERT INTO transactions (sender_id, receiver_id, amount, type, description, month_tag) VALUES (0, ?, ?, 'STOCK_SELL', ?, ?)",
+                                 (seller.id, revenue, f"株売却: {target.display_name}", month))
+                await db.commit()
+                return (f"📉 売却成功: {revenue:,} S 受取", True)
+            except Exception as e:
+                await db.rollback()
+                return (f"エラー: {e}", False)
+
+    # --- コマンド ---
+    @app_commands.command(name="株_取引パネル", description="株の売買パネルを開きます")
+    async def open_panel(self, interaction: discord.Interaction, target: discord.Member):
+        await self.init_market_db()
+        view = StockControlView(self, target)
+        embed = await view.update_embed(interaction)
+        if embed: await interaction.response.send_message(embed=embed, view=view)
+        else: await interaction.response.send_message("その人は上場していません。", ephemeral=True)
+
+    @app_commands.command(name="株_上場設定", description="【管理者】上場ロール設定")
+    @has_permission("ADMIN")
+    async def config_role(self, interaction, role: discord.Role):
+        async with self.bot.get_db() as db:
+            await db.execute("INSERT OR REPLACE INTO market_config (key, value) VALUES ('issuer_role_id', ?)", (str(role.id),))
+            await db.commit()
+        await interaction.response.send_message(f"✅ 上場ロールを {role.mention} に設定。", ephemeral=True)
+
+    @app_commands.command(name="株_上場", description="自分の株を上場します")
+    async def ipo(self, interaction):
+        await self.init_market_db()
+        user = interaction.user
+        # ロールチェック省略（必要なら追加）
+        async with self.bot.get_db() as db:
+            try:
+                await db.execute("INSERT INTO stock_issuers (user_id, total_shares) VALUES (?, 0)", (user.id,))
+                await db.commit()
+                await interaction.response.send_message(f"🎉 {user.mention} が上場しました！ `/株_取引パネル` で取引可能です。")
+            except:
+                await interaction.response.send_message("既に上場済みです。", ephemeral=True)
+
+    @app_commands.command(name="株_ランキング", description="人気銘柄ランキング")
+    async def ranking(self, interaction):
+        await self.init_market_db()
+        await interaction.response.defer()
+        async with self.bot.get_db() as db:
+            async with db.execute("SELECT user_id, total_shares FROM stock_issuers WHERE is_listed=1") as c: rows = await c.fetchall()
+        
+        data = []
+        for r in rows:
+            p = self.calculate_price(r['total_shares'])
+            m = interaction.guild.get_member(r['user_id'])
+            name = m.display_name if m else f"ID:{r['user_id']}"
+            data.append((name, p, r['total_shares']))
+        
+        data.sort(key=lambda x: x[1], reverse=True)
+        text = "\n".join([f"{i+1}. **{d[0]}**: {d[1]:,} S ({d[2]}株)" for i, d in enumerate(data[:10])])
+        await interaction.followup.send(embed=discord.Embed(title="📊 人気ランキング", description=text or "データなし", color=discord.Color.gold()))
+
 # グラフ描画関数をクラスの外（または静的メソッド）に出し、同期関数として定義します
 def generate_economy_dashboard(balances, history, flow_stats, type_breakdown, total_asset, avg_asset, active_citizens, active_days):
     """
@@ -3188,6 +3475,7 @@ class CestaBankBot(commands.Bot):
         await self.add_cog(AdminTools(self))
         await self.add_cog(ServerStats(self))
         await self.add_cog(ShopSystem(self))
+        await self.add_cog(StockControlView(self))
 
         await self.add_cog(MessageLogger(self))
         await self.add_cog(VoiceSystem(self))
