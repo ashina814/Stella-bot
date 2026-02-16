@@ -2323,9 +2323,10 @@ class Slot(commands.Cog):
             await interaction.followup.send(f"❌ エラー: `{e}`", ephemeral=True)
 
 # ==========================================
-#  軽量・高機能版: 人間株式市場 (1GB環境最適化)
+#  人間株式市場 (完全版: スター豪華演出 + 昇格システム)
 # ==========================================
 
+# --- 取引パネル (View) ---
 class StockControlView(discord.ui.View):
     def __init__(self, cog, target_user: discord.Member):
         super().__init__(timeout=300)
@@ -2333,40 +2334,86 @@ class StockControlView(discord.ui.View):
         self.target = target_user
 
     async def update_embed(self, interaction: discord.Interaction):
-        # 最新情報を取得
+        # 1. DBから最新情報を取得
+        star_role_id = None
         async with self.cog.bot.get_db() as db:
+            # スターロールIDの確認
+            async with db.execute("SELECT value FROM market_config WHERE key = 'star_role_id'") as c:
+                row = await c.fetchone()
+                if row: star_role_id = int(row['value'])
+
+            # 発行株数の確認
             async with db.execute("SELECT total_shares FROM stock_issuers WHERE user_id = ?", (self.target.id,)) as c:
                 row = await c.fetchone()
                 if not row: return None 
                 shares = row['total_shares']
             
+            # 自分の保有状況の確認
             async with db.execute("SELECT amount, avg_cost FROM stock_holdings WHERE user_id = ? AND issuer_id = ?", (interaction.user.id, self.target.id)) as c:
                 holding = await c.fetchone()
                 my_amount = holding['amount'] if holding else 0
                 my_avg = holding['avg_cost'] if holding else 0
 
+        # 2. スター判定（ターゲットがスターロールを持っているか？）
+        is_star = False
+        if star_role_id:
+            if any(r.id == star_role_id for r in self.target.roles):
+                is_star = True
+
         current_price = self.cog.calculate_price(shares)
         
-        # 損益計算
+        # 3. 損益計算
         total_val = current_price * my_amount
         profit = total_val - (my_avg * my_amount)
-        color = 0x00ff00 if profit >= 0 else 0xff0000
         sign = "+" if profit >= 0 else ""
+
+        # 4. デザインの分岐
+        if is_star:
+            # ★★★ スター用の豪華デザイン ★★★
+            color = 0xFFD700 # ゴールド
+            title = f"👑 {self.target.display_name} 👑"
+            desc = "✨ **STAR MEMBER** ✨\n現在ランキング上位のスター銘柄です。\n価格変動が激しい可能性があります。"
+            thumbnail_url = self.target.display_avatar.url
+        else:
+            # 通常デザイン（利益が出てれば緑、損失なら赤）
+            color = 0x00ff00 if profit >= 0 else 0xff0000
+            title = f"📈 {self.target.display_name} の銘柄"
+            desc = "ボタンで売買できます（手数料: 10%）"
+            thumbnail_url = self.target.display_avatar.url
         
-        embed = discord.Embed(title=f"📈 {self.target.display_name} の銘柄情報", color=color)
-        embed.set_thumbnail(url=self.target.display_avatar.url)
-        embed.description = "ボタンで売買できます（手数料: 10%）"
+        embed = discord.Embed(title=title, description=desc, color=color)
+        embed.set_thumbnail(url=thumbnail_url)
         
-        embed.add_field(name="💰 株価", value=f"**{current_price:,} S**", inline=True)
-        embed.add_field(name="🏢 発行数", value=f"{shares:,} 株", inline=True)
-        embed.add_field(name="配当", value="🗣️ 発言で発生", inline=True)
+        # 5. フィールド設定
+        # スターの場合は少しリッチな装飾文字を使う
+        icon_price = "💎" if is_star else "💰"
+        icon_stock = "🏰" if is_star else "🏢"
+
+        embed.add_field(name=f"{icon_price} 現在株価", value=f"**{current_price:,} S**", inline=True)
+        embed.add_field(name=f"{icon_stock} 発行数", value=f"{shares:,} 株", inline=True)
         
-        embed.add_field(name="──────────", value="**あなたの保有**", inline=False)
+        # 空白フィールドで段落調整
+        embed.add_field(name="\u200b", value="\u200b", inline=True) 
+
+        # 保有情報の表示
+        embed.add_field(name="──────────", value="**あなたの保有状況**", inline=False)
         embed.add_field(name="🎒 保有数", value=f"{my_amount:,} 株", inline=True)
-        embed.add_field(name="📊 損益", value=f"**{sign}{int(profit):,} S**", inline=True)
+        
+        # 損益表示（スターで色が固定されても、損益は文字色で見やすくする）
+        profit_str = f"{sign}{int(profit):,} S"
+        if profit >= 0:
+            val_str = f"```ansi\n\u001b[1;32m{profit_str}\u001b[0m```" # 緑
+        else:
+            val_str = f"```ansi\n\u001b[1;31m{profit_str}\u001b[0m```" # 赤
+            
+        embed.add_field(name="📊 評価損益", value=val_str, inline=True)
+        
+        if is_star:
+            embed.set_footer(text="★ スター銘柄: 2週間ごとの審査で入れ替わります")
         
         return embed
 
+    # --- ボタン処理 ---
     @discord.ui.button(label="買う(1)", style=discord.ButtonStyle.success, emoji="🛒", row=0)
     async def buy_one(self, interaction, button): await self._trade(interaction, "buy", 1)
 
@@ -2402,26 +2449,22 @@ class StockControlView(discord.ui.View):
             await interaction.response.send_message(msg, ephemeral=True)
 
 
+# --- 本体 (Cog) ---
 class HumanStockMarket(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         # --- 市場設定 ---
-        self.base_price = 100   
-        self.slope = 10         
-        self.trading_fee = 0.10 # 手数料10% (配当原資のため高め推奨)
-        self.issuer_fee = 0.05  
+        self.base_price = 100       # 最低価格
+        self.slope = 20             # 価格感応度（1株ごとの値上がり幅）
+        self.trading_fee = 0.10     # 手数料10%
+        self.issuer_fee = 0.05      # 発行者への還元5%
         
-        # --- 配当設定 ---
-        self.dividend_rate = 5  # 1株あたりの配当額
-        self.dividend_prob = 10 # 1/10の確率
-        
-        # --- 【軽量化】配当バッファ ---
-        self.dividend_buffer = {} 
-        self.buffer_flush_task.start()
+        self.promotion_cycle_task.start() # 昇格審査タスクを開始
 
     def cog_unload(self):
-        self.buffer_flush_task.cancel()
+        self.promotion_cycle_task.cancel()
 
+    # 価格計算式（ボンディングカーブ）
     def calculate_price(self, shares):
         return self.base_price + (shares * self.slope)
 
@@ -2432,59 +2475,125 @@ class HumanStockMarket(commands.Cog):
             await db.execute("CREATE TABLE IF NOT EXISTS market_config (key TEXT PRIMARY KEY, value TEXT)")
             await db.commit()
 
-    # --- 【軽量化】配当イベント (メモリに貯めるだけ) ---
-    @commands.Cog.listener()
-    async def on_message(self, message):
-        if message.author.bot or not message.guild: return
-        if random.randint(1, self.dividend_prob) != 1: return # 確率判定
-
-        # メモリ上に回数を記録するだけ (DBには書かない)
-        if message.author.id not in self.dividend_buffer:
-            self.dividend_buffer[message.author.id] = 0
-        self.dividend_buffer[message.author.id] += 1
-        
-        # リアクションで通知（任意）
-        try: await message.add_reaction("💰")
-        except: pass
-
-    # --- 【軽量化】定期書き込みタスク (1分に1回) ---
-    @tasks.loop(minutes=1)
-    async def buffer_flush_task(self):
-        if not self.dividend_buffer: return
-        
-        # バッファをコピーして空にする
-        buffer_copy = self.dividend_buffer.copy()
-        self.dividend_buffer.clear()
+    # --- 昇格・入れ替えシステム (2週間ごとのランキング集計) ---
+    @tasks.loop(hours=1) # 1時間ごとにチェック
+    async def promotion_cycle_task(self):
+        await self.bot.wait_until_ready()
+        now = datetime.datetime.now()
         
         async with self.bot.get_db() as db:
-            for issuer_id, count in buffer_copy.items():
-                # 上場チェック & 株主取得
-                async with db.execute("SELECT total_shares FROM stock_issuers WHERE user_id = ? AND is_listed = 1", (issuer_id,)) as c:
-                    if not await c.fetchone(): continue
+            # 次回の審査日時を取得
+            async with db.execute("SELECT value FROM market_config WHERE key = 'next_promotion_date'") as c:
+                row = await c.fetchone()
+                if row:
+                    next_date = datetime.datetime.fromisoformat(row['value'])
+                else:
+                    # 設定がない場合は現在時刻から2週間後をセット
+                    next_date = now + datetime.timedelta(weeks=2)
+                    await db.execute("INSERT OR REPLACE INTO market_config (key, value) VALUES ('next_promotion_date', ?)", (next_date.isoformat(),))
+                    await db.commit()
+                    return # 初回セット時はスキップ
 
-                async with db.execute("SELECT user_id, amount FROM stock_holdings WHERE issuer_id = ?", (issuer_id,)) as c:
-                    holders = await c.fetchall()
-                
-                if not holders: continue
+        # 審査時刻を過ぎていたら実行
+        if now >= next_date:
+            await self.execute_promotion(now)
 
-                # 配る金額計算 (回数分まとめて)
-                payout_per_share = self.dividend_rate * count
-                updates = []
-                system_out = 0
-                
-                for h in holders:
-                    pay = h['amount'] * payout_per_share
-                    if pay > 0:
-                        updates.append((pay, h['user_id']))
-                        system_out += pay
-                
-                if updates:
-                    await db.executemany("UPDATE accounts SET balance = balance + ? WHERE user_id = ?", updates)
-                    await db.execute("UPDATE accounts SET balance = balance + ? WHERE user_id = 0", (system_out,))
+    async def execute_promotion(self, now):
+        guild = self.bot.guilds[0] # メインサーバーを想定
+        cast_role_id = None
+        star_role_id = None
+        log_ch_id = None
+
+        # 設定読み込み
+        async with self.bot.get_db() as db:
+            async with db.execute("SELECT key, value FROM market_config") as c:
+                async for row in c:
+                    if row['key'] == 'cast_role_id': cast_role_id = int(row['value'])
+                    elif row['key'] == 'star_role_id': star_role_id = int(row['value'])
+                    elif row['key'] == 'promotion_log_id': log_ch_id = int(row['value'])
             
+            # ランキング集計（株価が高い順 = 発行数が多い順）
+            async with db.execute("SELECT user_id, total_shares FROM stock_issuers WHERE is_listed=1 ORDER BY total_shares DESC") as c:
+                rankings = await c.fetchall()
+
+        if not cast_role_id or not star_role_id:
+            logger.error("Roles for Stock Market promotion are not set.")
+            return
+
+        cast_role = guild.get_role(cast_role_id)
+        star_role = guild.get_role(star_role_id)
+        if not cast_role or not star_role: return
+
+        # 上位4名を特定
+        top_4_ids = []
+        promoted_members = []
+        demoted_members = []
+
+        # ランキング上位からループして、キャストロールを持っている人を探す
+        for row in rankings:
+            if len(top_4_ids) >= 4: break
+            
+            member = guild.get_member(row['user_id'])
+            if member and cast_role in member.roles: # キャストロール所持者のみ対象
+                top_4_ids.append(member.id)
+
+        # 1. スターロールの付与と剥奪処理
+        # 現在スターロールを持っている全員をチェック
+        for member in star_role.members:
+            if member.id not in top_4_ids:
+                try:
+                    await member.remove_roles(star_role, reason="株価ランキング圏外による降格")
+                    demoted_members.append(member.display_name)
+                except: pass
+        
+        # 新トップ4にスターロール付与
+        for uid in top_4_ids:
+            member = guild.get_member(uid)
+            if member:
+                if star_role not in member.roles:
+                    try:
+                        await member.add_roles(star_role, reason="株価ランキングTop4入り")
+                        promoted_members.append(member.display_name)
+                    except: pass
+
+        # 次回の日程を更新 (2週間後)
+        next_due = now + datetime.timedelta(weeks=2)
+        async with self.bot.get_db() as db:
+            await db.execute("INSERT OR REPLACE INTO market_config (key, value) VALUES ('next_promotion_date', ?)", (next_due.isoformat(),))
             await db.commit()
 
-    # --- 内部処理: 購入 (ボタン・コマンド共通) ---
+        # ログ・通知送信
+        if log_ch_id:
+            channel = self.bot.get_channel(log_ch_id)
+            if channel:
+                embed = discord.Embed(title="👑 キャスト選抜総選挙 結果発表", description="株価ランキングによるスター入れ替えが行われました。", color=discord.Color.gold())
+                
+                top_text = ""
+                for i, uid in enumerate(top_4_ids):
+                    m = guild.get_member(uid)
+                    name = m.display_name if m else "Unknown"
+                    share_val = 0
+                    # 株価取得用
+                    for r in rankings:
+                        if r['user_id'] == uid:
+                            share_val = self.calculate_price(r['total_shares'])
+                            break
+                    top_text += f"**{i+1}位**: {name} (株価: {share_val:,} S)\n"
+                
+                if not top_text: top_text = "該当者なし"
+
+                embed.add_field(name="🏆 新スターメンバー (Top 4)", value=top_text, inline=False)
+                
+                if promoted_members:
+                    embed.add_field(name="⬆️ 新規昇格", value=", ".join(promoted_members), inline=True)
+                if demoted_members:
+                    embed.add_field(name="⬇️ 降格", value=", ".join(demoted_members), inline=True)
+                
+                embed.set_footer(text=f"次回審査: {next_due.strftime('%Y/%m/%d %H:%M')}")
+                await channel.send(embed=embed)
+
+
+    # --- 内部処理: 購入 ---
     async def internal_buy(self, buyer, target, amount):
         if buyer.id == target.id: return ("❌ 自己売買は禁止です。", False)
         
@@ -2494,7 +2603,10 @@ class HumanStockMarket(commands.Cog):
                 if not row: return ("❌ 上場していません。", False)
                 shares = row['total_shares']
 
+            # 価格計算
             unit_price = self.calculate_price(shares)
+            
+            # 購入処理
             subtotal = unit_price * amount
             fee = int(subtotal * self.trading_fee)
             bonus = int(subtotal * self.issuer_fee)
@@ -2505,26 +2617,30 @@ class HumanStockMarket(commands.Cog):
                 if not bal or bal['balance'] < total: return (f"❌ 資金不足 (必要: {total:,} S)", False)
 
             try:
+                # 資産移動
                 await db.execute("UPDATE accounts SET balance = balance - ? WHERE user_id = ?", (total, buyer.id))
-                await db.execute("UPDATE accounts SET balance = balance + ? WHERE user_id = ?", (bonus, target.id))
+                await db.execute("UPDATE accounts SET balance = balance + ? WHERE user_id = ?", (bonus, target.id)) # 発行者へ還元
                 
+                # 保有データ更新
                 async with db.execute("SELECT amount, avg_cost FROM stock_holdings WHERE user_id = ? AND issuer_id = ?", (buyer.id, target.id)) as c:
                     h = await c.fetchone()
                 
                 if h:
                     new_n = h['amount'] + amount
+                    # 平均取得単価の更新
                     new_avg = ((h['amount'] * h['avg_cost']) + subtotal) / new_n
                     await db.execute("UPDATE stock_holdings SET amount = ?, avg_cost = ? WHERE user_id = ? AND issuer_id = ?", (new_n, new_avg, buyer.id, target.id))
                 else:
                     await db.execute("INSERT INTO stock_holdings (user_id, issuer_id, amount, avg_cost) VALUES (?, ?, ?, ?)", (buyer.id, target.id, amount, unit_price))
                 
+                # 発行数増加（これにより次の人の購入価格が上がる）
                 await db.execute("UPDATE stock_issuers SET total_shares = total_shares + ? WHERE user_id = ?", (amount, target.id))
                 
                 month = datetime.datetime.now().strftime("%Y-%m")
                 await db.execute("INSERT INTO transactions (sender_id, receiver_id, amount, type, description, month_tag) VALUES (?, ?, ?, 'STOCK_BUY', ?, ?)",
                                  (buyer.id, 0, total, f"株購入: {target.display_name}", month))
                 await db.commit()
-                return (f"✅ 購入成功: {target.display_name} x{amount}株", True)
+                return (f"✅ 購入成功: {target.display_name} x{amount}株 (単価: {unit_price:,} S)", True)
             except Exception as e:
                 await db.rollback()
                 return (f"エラー: {e}", False)
@@ -2541,6 +2657,7 @@ class HumanStockMarket(commands.Cog):
                 h = await c.fetchone()
                 if not h or h['amount'] < amount: return ("❌ 保有数不足", False)
 
+            # 現在価格で売却（売るときは少し安くなる＝スプレッド要素として、base_price計算を現在発行数ベースで行う）
             unit_price = self.calculate_price(shares)
             revenue = unit_price * amount
             
@@ -2550,6 +2667,7 @@ class HumanStockMarket(commands.Cog):
                 else: await db.execute("UPDATE stock_holdings SET amount = ? WHERE user_id = ? AND issuer_id = ?", (new_n, seller.id, target.id))
                 
                 await db.execute("UPDATE accounts SET balance = balance + ? WHERE user_id = ?", (revenue, seller.id))
+                # 発行数を減らす（価格が下がる）
                 await db.execute("UPDATE stock_issuers SET total_shares = total_shares - ? WHERE user_id = ?", (amount, target.id))
                 
                 month = datetime.datetime.now().strftime("%Y-%m")
@@ -2561,7 +2679,62 @@ class HumanStockMarket(commands.Cog):
                 await db.rollback()
                 return (f"エラー: {e}", False)
 
-    # --- コマンド ---
+    # --- コマンド類 ---
+
+    @app_commands.command(name="株_キャスト設定", description="【管理者】上場可能な『キャスト』ロールを設定します")
+    @has_permission("ADMIN")
+    async def config_cast_role(self, interaction: discord.Interaction, role: discord.Role):
+        await interaction.response.defer(ephemeral=True)
+        async with self.bot.get_db() as db:
+            await db.execute("INSERT OR REPLACE INTO market_config (key, value) VALUES ('cast_role_id', ?)", (str(role.id),))
+            await db.commit()
+        await interaction.followup.send(f"✅ 上場可能ロールを {role.mention} に設定しました。", ephemeral=True)
+
+    @app_commands.command(name="株_スター設定", description="【管理者】ランキング上位に付与する『スター』ロールを設定します")
+    @has_permission("ADMIN")
+    async def config_star_role(self, interaction: discord.Interaction, role: discord.Role):
+        await interaction.response.defer(ephemeral=True)
+        async with self.bot.get_db() as db:
+            await db.execute("INSERT OR REPLACE INTO market_config (key, value) VALUES ('star_role_id', ?)", (str(role.id),))
+            await db.commit()
+        await interaction.followup.send(f"✅ 上位報酬ロールを {role.mention} に設定しました。", ephemeral=True)
+
+    @app_commands.command(name="株_結果ログ設定", description="【管理者】昇格・降格の結果を発表するチャンネルを設定します")
+    @has_permission("ADMIN")
+    async def config_promo_log(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        await interaction.response.defer(ephemeral=True)
+        async with self.bot.get_db() as db:
+            await db.execute("INSERT OR REPLACE INTO market_config (key, value) VALUES ('promotion_log_id', ?)", (str(channel.id),))
+            await db.commit()
+        await interaction.followup.send(f"✅ 結果発表先を {channel.mention} に設定しました。", ephemeral=True)
+
+    @app_commands.command(name="株_上場", description="自分の株を上場します（キャスト限定）")
+    async def ipo(self, interaction):
+        await self.init_market_db()
+        user = interaction.user
+
+        # ロールチェック
+        cast_role_id = None
+        async with self.bot.get_db() as db:
+            async with db.execute("SELECT value FROM market_config WHERE key = 'cast_role_id'") as c:
+                row = await c.fetchone()
+                if row: cast_role_id = int(row['value'])
+        
+        if not cast_role_id:
+            return await interaction.response.send_message("❌ システムエラー: キャストロールが未設定です。管理者に連絡してください。", ephemeral=True)
+
+        has_cast_role = any(r.id == cast_role_id for r in user.roles)
+        if not has_cast_role:
+             return await interaction.response.send_message("❌ 上場できるのは『キャスト』のみです。", ephemeral=True)
+
+        async with self.bot.get_db() as db:
+            try:
+                await db.execute("INSERT INTO stock_issuers (user_id, total_shares) VALUES (?, 0)", (user.id,))
+                await db.commit()
+                await interaction.response.send_message(f"🎉 {user.mention} が株式市場に上場しました！\n誰でもこの株を売買して利益を狙えます。")
+            except:
+                await interaction.response.send_message("既に上場済みです。", ephemeral=True)
+
     @app_commands.command(name="株_取引パネル", description="株の売買パネルを開きます")
     async def open_panel(self, interaction: discord.Interaction, target: discord.Member):
         await self.init_market_db()
@@ -2570,44 +2743,49 @@ class HumanStockMarket(commands.Cog):
         if embed: await interaction.response.send_message(embed=embed, view=view)
         else: await interaction.response.send_message("その人は上場していません。", ephemeral=True)
 
-    @app_commands.command(name="株_上場設定", description="【管理者】上場ロール設定")
-    @has_permission("ADMIN")
-    async def config_role(self, interaction, role: discord.Role):
-        async with self.bot.get_db() as db:
-            await db.execute("INSERT OR REPLACE INTO market_config (key, value) VALUES ('issuer_role_id', ?)", (str(role.id),))
-            await db.commit()
-        await interaction.response.send_message(f"✅ 上場ロールを {role.mention} に設定。", ephemeral=True)
-
-    @app_commands.command(name="株_上場", description="自分の株を上場します")
-    async def ipo(self, interaction):
-        await self.init_market_db()
-        user = interaction.user
-        # ロールチェック省略（必要なら追加）
-        async with self.bot.get_db() as db:
-            try:
-                await db.execute("INSERT INTO stock_issuers (user_id, total_shares) VALUES (?, 0)", (user.id,))
-                await db.commit()
-                await interaction.response.send_message(f"🎉 {user.mention} が上場しました！ `/株_取引パネル` で取引可能です。")
-            except:
-                await interaction.response.send_message("既に上場済みです。", ephemeral=True)
-
-    @app_commands.command(name="株_ランキング", description="人気銘柄ランキング")
-    async def ranking(self, interaction):
+    @app_commands.command(name="株_ランキング", description="現在の株価ランキングと次回の審査日を表示します")
+    async def ranking(self, interaction: discord.Interaction):
         await self.init_market_db()
         await interaction.response.defer()
+        
+        next_date_str = "未定"
         async with self.bot.get_db() as db:
             async with db.execute("SELECT user_id, total_shares FROM stock_issuers WHERE is_listed=1") as c: rows = await c.fetchall()
-        
+            async with db.execute("SELECT value FROM market_config WHERE key = 'next_promotion_date'") as c:
+                row = await c.fetchone()
+                if row:
+                    dt = datetime.datetime.fromisoformat(row['value'])
+                    next_date_str = dt.strftime("%m/%d %H:%M")
+
         data = []
         for r in rows:
             p = self.calculate_price(r['total_shares'])
             m = interaction.guild.get_member(r['user_id'])
-            name = m.display_name if m else f"ID:{r['user_id']}"
+            # 退室したメンバーなどは除外
+            if not m: continue
+            
+            name = m.display_name
             data.append((name, p, r['total_shares']))
         
+        # 株価順（=発行数順）にソート
         data.sort(key=lambda x: x[1], reverse=True)
-        text = "\n".join([f"{i+1}. **{d[0]}**: {d[1]:,} S ({d[2]}株)" for i, d in enumerate(data[:10])])
-        await interaction.followup.send(embed=discord.Embed(title="📊 人気ランキング", description=text or "データなし", color=discord.Color.gold()))
+        
+        desc = f"📅 **次回審査: {next_date_str}**\n上位4名が『スター』に昇格します。\n\n"
+        
+        for i, d in enumerate(data[:10]):
+            rank_icon = "👑" if i < 4 else f"{i+1}."
+            bold = "**" if i < 4 else ""
+            line = f"{rank_icon} {bold}{d[0]}{bold}: 株価 {d[1]:,} S (流通: {d[2]}株)\n"
+            desc += line
+            
+        if len(data) > 10: desc += f"\n...他 {len(data)-10} 名"
+
+        embed = discord.Embed(title="📊 キャスト株価ランキング", description=desc, color=discord.Color.gold())
+        embed.set_footer(text="株を買うと価格が上がり、売ると下がります。推しをスターに押し上げよう！")
+        await interaction.followup.send(embed=embed)
+
+
+
 
 # グラフ描画関数をクラスの外（または静的メソッド）に出し、同期関数として定義します
 def generate_economy_dashboard(balances, history, flow_stats, type_breakdown, total_asset, avg_asset, active_citizens, active_days):
