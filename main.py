@@ -712,7 +712,7 @@ class Economy(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="今日の残り回数", description="今日のギャンブル残り回数を確認します")
-async def check_remaining(self, interaction: discord.Interaction):
+    async def check_remaining(self, interaction: discord.Interaction):
     _, remaining_chinchiro = await check_daily_limit(self.bot, interaction.user.id, "chinchiro")
     _, remaining_slot = await check_daily_limit(self.bot, interaction.user.id, "slot")
 
