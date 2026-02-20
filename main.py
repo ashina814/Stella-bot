@@ -164,8 +164,7 @@ class BankDatabase:
         )""")
 
                 # 3. VC関連
-        # ▼ 古い形式のテーブルを一度削除して作り直す（★起動確認後はここに # をつけて無効化！）
-        await conn.execute("DROP TABLE IF EXISTS voice_stats")
+        
         
         # ▼ 月間対応の新しいテーブルを作成
         await conn.execute("""CREATE TABLE IF NOT EXISTS voice_stats (
@@ -1430,8 +1429,6 @@ class VoiceSystem(commands.Cog):
                     if reward > 0:
                         month_tag = now.strftime("%Y-%m")
                         
-                    if reward > 0:
-                        month_tag = now.strftime("%Y-%m")
                         
                         await db.execute("INSERT OR IGNORE INTO accounts (user_id, balance, total_earned) VALUES (0, 0, 0)")
                         await db.execute("INSERT OR IGNORE INTO accounts (user_id, balance, total_earned) VALUES (?, 0, 0)", (user_id,))
@@ -1450,9 +1447,9 @@ class VoiceSystem(commands.Cog):
                             "UPDATE voice_stats SET total_seconds = total_seconds + ? WHERE user_id = ? AND month = ?", 
                             (sec, user_id, month_tag)
                         )
-                        # ▲▲ ここまで ▲▲
-
-                        await db.execute()
+                    # reward=0でも追跡レコードは必ず消す（★修正②）
+                    await db.execute("DELETE FROM voice_tracking WHERE user_id = ?", (user_id,))
+                    await db.commit()  # ★修正①: commitを追加
 
 
                 except Exception as db_err:
@@ -1844,80 +1841,6 @@ class Chinchiro(commands.Cog):
         
         return best_res
 
-  
-    @app_commands.command(name="チンチロ", description="セスタと勝負。")
-    async def chinchiro(self, interaction: discord.Interaction, bet: int):
-        if bet < 100: 
-            return await interaction.response.send_message("100Stellからにして。小銭じゃつまんないし。", ephemeral=True)
-        if bet > self.max_bet:
-            return await interaction.response.send_message(f"上限は **{self.max_bet:,} Stell** まで！ 私が破産しちゃうでしょ！", ephemeral=True)
-
-        now = datetime.datetime.now()
-        last_time = self.last_played.get(interaction.user.id)
-        
-        if last_time and (now - last_time).total_seconds() > 1800:
-            self.play_counts[interaction.user.id] = 0
-        
-        if last_time and (now - last_time).total_seconds() < 3.0: 
-            return await interaction.response.send_message("ちょっと焦りすぎじゃない？ ざぁこ♡", ephemeral=True)
-
-        self.last_played[interaction.user.id] = now
-        self.play_counts[interaction.user.id] = self.play_counts.get(interaction.user.id, 0) + 1
-        humidity = self.play_counts[interaction.user.id]
-
-        # 残高とオールイン判定の取得
-        async with self.bot.get_db() as db:
-            async with db.execute("SELECT balance FROM accounts WHERE user_id = ?", (interaction.user.id,)) as c:
-                row = await c.fetchone()
-                if not row or row['balance'] < bet:
-                    return await interaction.response.send_message("…お金ないじゃん。出直してきな！", ephemeral=True)
-                curr_balance = row['balance']
-
-        is_all_in = (bet == curr_balance and bet >= 100)
-
-        await interaction.response.defer()
-
-        opening_line = self.get_cesta_dialogue("intro", interaction.user.display_name, bet, humidity, is_all_in)
-        embed = discord.Embed(title="🎲 セスタの賭博", description=opening_line, color=0x2f3136)
-        embed.set_thumbnail(url=self.bot.user.display_avatar.url)
-        embed.add_field(name="親：セスタ", value=self.render_hud("セスタ", ["?", "?", "?"], "待機中..."), inline=False)
-        embed.add_field(name=f"子：{interaction.user.display_name}", value="準備中...", inline=False)
-        msg = await interaction.followup.send(embed=embed)
-
-        p_dice, p_score, p_name, p_mult, p_rank, p_super = self.get_roll_result()
-        if p_score == 0: 
-             p_dice, p_score, p_name, p_mult, p_rank, p_super = self.get_roll_result()
-
-        phud = self.render_hud("セスタ", p_dice, p_name, "gold" if p_super else ("red" if p_score <= 0 else "blue"))
-        embed.set_field_at(0, name="親：セスタ (確定)", value=phud, inline=False)
-        await msg.edit(embed=embed)
-        
-        if p_score >= 90:
-             return await self.settle_pve(msg, embed, interaction.user, bet, -p_mult if p_mult > 0 else -1, humidity, p_score, 0, is_all_in)
-        if p_score == -99:
-             return await self.settle_pve(msg, embed, interaction.user, bet, 1, humidity, p_score, 0, is_all_in)
-
-        u_res = await self.run_player_turn(msg, embed, 1, interaction.user)
-        u_score, u_mult = u_res["score"], u_res["mult"]
-
-        final_mult = 0
-        if u_score == -99:
-            final_mult = -1
-        elif u_score == -1:
-            final_mult = -2 
-        elif u_score > p_score:
-            final_mult = max(u_mult, abs(p_mult) if p_mult < 0 else 1)
-        elif u_score < p_score:
-            final_mult = -max(p_mult, abs(u_mult) if u_mult < 0 else 1)
-        else:
-            final_mult = 0 # 引き分けは0(返金)
-
-        await self.settle_pve(msg, embed, interaction.user, bet, final_mult, humidity, p_score, u_score, is_all_in)
-
-    async def settle_pve(self, msg, embed, user, bet, multiplier, humidity, p_score=0, u_score=0, is_all_in=False):
-        async with self.bot.get_db() as db:
-            async with db.execute("SELECT balance FROM accounts WHERE user_id = ?", (user.id,)) as c:
-                curr_balance = (await c.fetchone())['balance']
     # ------------------------------------------------------------------
     #  PvE: 対セスタ
     # ------------------------------------------------------------------
