@@ -1452,7 +1452,7 @@ class VoiceSystem(commands.Cog):
                         )
                         # ▲▲ ここまで ▲▲
 
-                        await db.execute(
+                        await db.execute()
 
 
                 except Exception as db_err:
