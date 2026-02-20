@@ -3681,8 +3681,8 @@ class AdminTools(commands.Cog):
             await db.commit()
         await self.bot.config.reload()
         await interaction.followup.send(f"✅ 経済統計の対象を **{role.name}** を持つメンバーに限定しました。", ephemeral=True)
-
-　　　@app_commands.command(name="経済集計アクティブ判定期間", description="経済統計に含める「アクティブ期間（日数）」を設定します")
+        
+    @app_commands.command(name="経済集計アクティブ判定期間", description="経済統計に含める「アクティブ期間（日数）」を設定します")
     @app_commands.describe(days="この日数以内に取引がない人は、市民ロールを持っていても計算から除外されます（推奨: 30）")
     @has_permission("SUPREME_GOD")
     async def config_active_days(self, interaction: discord.Interaction, days: int):
