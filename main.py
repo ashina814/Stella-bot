@@ -243,7 +243,24 @@ class BankDatabase:
             )
         """)
         await conn.execute("CREATE TABLE IF NOT EXISTS market_config (key TEXT PRIMARY KEY, value TEXT)")
-
+# setup メソッドの末尾、await conn.commit() の前に追加
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS daily_play_counts (
+                user_id INTEGER,
+                game TEXT,
+                date TEXT,
+                count INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, game, date)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS daily_play_exemptions (
+                user_id INTEGER,
+                game TEXT,
+                date TEXT,
+                PRIMARY KEY (user_id, game, date)
+            )
+        """)
         await conn.commit()
 
 
@@ -693,6 +710,25 @@ class Economy(commands.Cog):
                 inline=False
             )
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="今日の残り回数", description="今日のギャンブル残り回数を確認します")
+async def check_remaining(self, interaction: discord.Interaction):
+    _, remaining_chinchiro = await check_daily_limit(self.bot, interaction.user.id, "chinchiro")
+    _, remaining_slot = await check_daily_limit(self.bot, interaction.user.id, "slot")
+
+    embed = discord.Embed(title="🎲 本日のギャンブル残り回数", color=0x2b2d31)
+    embed.add_field(
+        name="🎲 チンチロ",
+        value=f"残り **{min(remaining_chinchiro, 10)} / 10** 回" if remaining_chinchiro < 99999 else "✨ 制限解除中",
+        inline=True
+    )
+    embed.add_field(
+        name="🎰 スロット",
+        value=f"残り **{min(remaining_slot, 10)} / 10** 回" if remaining_slot < 99999 else "✨ 制限解除中",
+        inline=True
+    )
+    embed.set_footer(text="制限は毎日0時にリセットされます")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # === 追加機能1: 所持金ランキング ===
     @app_commands.command(name="ランキング", description="サーバー内の大富豪トップ10を表示します")
@@ -1612,6 +1648,47 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 
+async def check_daily_limit(bot, user_id: int, game: str, limit: int = 10) -> tuple[bool, int]:
+    """
+    1日のプレイ回数を確認する。
+    戻り値: (制限に引っかかったか, 今日の残り回数)
+    引っかかった = True なら弾く
+    """
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+
+    async with bot.get_db() as db:
+        # 免除チェック
+        async with db.execute(
+            "SELECT 1 FROM daily_play_exemptions WHERE user_id = ? AND game = ? AND date = ?",
+            (user_id, game, today)
+        ) as c:
+            if await c.fetchone():
+                return False, 99999  # 制限なし
+
+        # 今日の回数を取得
+        async with db.execute(
+            "SELECT count FROM daily_play_counts WHERE user_id = ? AND game = ? AND date = ?",
+            (user_id, game, today)
+        ) as c:
+            row = await c.fetchone()
+            current = row['count'] if row else 0
+
+    remaining = limit - current
+    if remaining <= 0:
+        return True, 0
+    return False, remaining
+
+
+async def increment_daily_count(bot, user_id: int, game: str):
+    """プレイ後に回数を+1する"""
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    async with bot.get_db() as db:
+        await db.execute("""
+            INSERT INTO daily_play_counts (user_id, game, date, count) VALUES (?, ?, ?, 1)
+            ON CONFLICT(user_id, game, date) DO UPDATE SET count = count + 1
+        """, (user_id, game, today))
+        await db.commit()
+
 class Chinchiro(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -1851,6 +1928,16 @@ class Chinchiro(commands.Cog):
         if bet > self.max_bet:
             return await interaction.response.send_message(f"ちょっと！ 上限は **{self.max_bet:,} Stell** まで！ 私から全部巻き上げるつもり！？ …手加減しなさいよ！", ephemeral=True)
 
+    # ▼ 日次制限チェック（ここを追加）
+        is_over, remaining = await check_daily_limit(self.bot, interaction.user.id, "chinchiro")
+        if is_over:
+            return await interaction.response.send_message(
+            "セスタ「今日はもう終わり。また明日いらっしゃい♡ 依存症は私でも面倒みきれないわ。」\n"
+            "（本日の上限10回に達しました）",
+            ephemeral=True
+        )
+    # ▲ ここまで
+
         now = datetime.datetime.now()
         last_time = self.last_played.get(interaction.user.id)
         
@@ -1969,6 +2056,7 @@ class Chinchiro(commands.Cog):
                 embed.description = self.get_cesta_dialogue("draw_push", user.display_name, 0, humidity, is_all_in)
             
             await db.commit()
+            await increment_daily_count(self.bot, user.id, "chinchiro")
             
         embed.add_field(name="最終結果", value=res_str, inline=False)
         await msg.edit(embed=embed, view=None)
@@ -2366,6 +2454,15 @@ class Slot(commands.Cog):
         if bet < 100: return await interaction.response.send_message("100Stellから。", ephemeral=True)
         if bet > 200000:return await interaction.response.send_message("…熱くなりすぎよ。賭け金は 200,000 Stell までにしておきなさい。", ephemeral=True)
 
+             # ▼ 日次制限チェック（ここを追加）
+        is_over, remaining = await check_daily_limit(self.bot, interaction.user.id, "slot")
+        if is_over:
+            return await interaction.response.send_message(
+               "ステラ「今日はもう閉店よ。また明日いらっしゃい♡」\n"
+               "（本日の上限10回に達しました）",
+               ephemeral=True
+           )
+        
         now = datetime.datetime.now()
         last_time = self.last_played.get(interaction.user.id)
         if last_time and (now - last_time).total_seconds() < 3.5:
@@ -2546,6 +2643,8 @@ class Slot(commands.Cog):
                             ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + ?
                         """, (charge, charge))
                         await db.commit()
+                        await increment_daily_count(self.bot, interaction.user.id, "slot")
+# ▲
                 
                 self.loss_streak[user.id] = self.loss_streak.get(user.id, 0) + 1
                 comment = self.get_stella_comment("lose")
@@ -3583,7 +3682,7 @@ class AdminTools(commands.Cog):
         await self.bot.config.reload()
         await interaction.followup.send(f"✅ 経済統計の対象を **{role.name}** を持つメンバーに限定しました。", ephemeral=True)
 
-    @app_commands.command(name="経済集計アクティブ判定期間", description="経済統計に含める「アクティブ期間（日数）」を設定します")
+　　　@app_commands.command(name="経済集計アクティブ判定期間", description="経済統計に含める「アクティブ期間（日数）」を設定します")
     @app_commands.describe(days="この日数以内に取引がない人は、市民ロールを持っていても計算から除外されます（推奨: 30）")
     @has_permission("SUPREME_GOD")
     async def config_active_days(self, interaction: discord.Interaction, days: int):
@@ -3597,8 +3696,36 @@ class AdminTools(commands.Cog):
         await self.bot.config.reload()
         await interaction.followup.send(f"✅ 過去 **{days}日間** に取引がないメンバーを、経済統計から除外するように設定しました。", ephemeral=True)
 
+    @app_commands.command(name="ギャンブル制限解除", description="【管理者】指定ユーザーの今日のプレイ制限を解除します")
+    @app_commands.describe(
+        target="対象ユーザー",
+        game="解除するゲーム"
+    )
+    @app_commands.choices(game=[
+        app_commands.Choice(name="チンチロ", value="chinchiro"),
+        app_commands.Choice(name="スロット", value="slot"),
+        app_commands.Choice(name="両方", value="all"),
+    ])
+    @has_permission("ADMIN")
+    async def lift_play_limit(self, interaction: discord.Interaction, target: discord.Member, game: str):
+        await interaction.response.defer(ephemeral=True)
 
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        games = ["chinchiro", "slot"] if game == "all" else [game]
 
+        async with self.bot.get_db() as db:
+            for g in games:
+                await db.execute("""
+                    INSERT OR IGNORE INTO daily_play_exemptions (user_id, game, date)
+                    VALUES (?, ?, ?)
+                """, (target.id, g, today))
+            await db.commit()
+
+        game_str = "チンチロ・スロット両方" if game == "all" else ("チンチロ" if game == "chinchiro" else "スロット")
+        await interaction.followup.send(
+            f"✅ {target.mention} の **{game_str}** の本日の制限を解除しました。",
+            ephemeral=True
+        )
 # --- 追加: 面接用のUIパネル ---
 class InterviewPanelView(discord.ui.View):
     def __init__(self, bot, routes, probation_role_id):
