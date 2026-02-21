@@ -198,6 +198,8 @@ class BankDatabase:
                 shop_id TEXT,
                 price INTEGER,
                 description TEXT,
+                item_type TEXT DEFAULT 'rental',
+                max_per_user INTEGER DEFAULT 0,
                 PRIMARY KEY (role_id, shop_id)
             )
         """)
@@ -207,6 +209,18 @@ class BankDatabase:
                 role_id INTEGER,
                 expiry_date TEXT,
                 PRIMARY KEY (user_id, role_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS ticket_inventory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                shop_id TEXT,
+                item_key TEXT,
+                item_name TEXT,
+                purchased_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                used_at DATETIME,
+                used_by INTEGER
             )
         """)
         await conn.execute("""
@@ -223,9 +237,6 @@ class BankDatabase:
             )
         """)
         await conn.execute("CREATE TABLE IF NOT EXISTS daily_stats (date TEXT PRIMARY KEY, total_balance INTEGER)")
-
-        # --- 追加: 人間株式市場用のテーブル ---
-        # まだ作成されていない場合に備えてここにも記述しておくと安全です
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS stock_issuers (
                 user_id INTEGER PRIMARY KEY,
@@ -243,7 +254,6 @@ class BankDatabase:
             )
         """)
         await conn.execute("CREATE TABLE IF NOT EXISTS market_config (key TEXT PRIMARY KEY, value TEXT)")
-# setup メソッドの末尾、await conn.commit() の前に追加
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_play_counts (
                 user_id INTEGER,
@@ -262,7 +272,6 @@ class BankDatabase:
             )
         """)
         await conn.commit()
-
 
     
 # --- UI: VC内操作パネル  ---
@@ -854,7 +863,7 @@ class Salary(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @app_commands.command(name="給与通知設定", description="給与支給時のDM明細通知をON/OFFします")
+    @app_commands.command(name="通貨通知設定", description="通貨交換時のDM明細通知をON/OFFします")
     @app_commands.describe(status="ON: 通知を受け取る / OFF: 通知しない")
     @app_commands.choices(status=[
         app_commands.Choice(name="ON (通知する)", value=1),
@@ -869,7 +878,7 @@ class Salary(commands.Cog):
             """, (interaction.user.id, status))
             await db.commit()
         
-        msg = "✅ 今後、給与明細は **DMで通知されます**。" if status == 1 else "🔕 今後、給与明細の **DM通知は行われません**。"
+        msg = "✅ 今後、お金の明細は **DMで通知されます**。" if status == 1 else "🔕 今後、給与明細の **DM通知は行われません**。"
         await interaction.response.send_message(msg, ephemeral=True)
 
     @app_commands.command(name="一括給与", description="全役職の給与を合算支給し、明細をDM送信します")
@@ -1508,56 +1517,104 @@ class VoiceHistory(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @app_commands.command(name="vc記録", description="指定したユーザーの【今月の】VC累計滞在時間を画像で表示します")
-    @app_commands.describe(member="確認したいユーザー")
-    @has_permission("GODDESS")
-    async def vc_history(self, interaction: discord.Interaction, member: discord.Member):
-        await interaction.response.defer()
+    @app_commands.command(name="vc記録", description="今月のVC累計滞在時間を確認します")
+    @app_commands.describe(
+        member="確認したいユーザー（省略すると自分）",
+        role="このロールを持つ全員の一覧を表示（管理者専用）"
+    )
+    async def vc_history(
+        self,
+        interaction: discord.Interaction,
+        member: Optional[discord.Member] = None,
+        role: Optional[discord.Role] = None
+    ):
+        await interaction.response.defer(ephemeral=True)
 
-        # 今月の年月タグを取得 (例: "2026-02")
         current_month = datetime.datetime.now().strftime("%Y-%m")
+        is_admin = await interaction.client.is_owner(interaction.user) or any(
+            r.id in interaction.client.config.admin_roles and
+            interaction.client.config.admin_roles[r.id] in ["SUPREME_GOD", "GODDESS"]
+            for r in interaction.user.roles
+        )
+
+        # --- ロール指定（管理者専用） ---
+        if role is not None:
+            if not is_admin:
+                return await interaction.followup.send("❌ ロール指定は管理者のみ使用できます。", ephemeral=True)
+
+            targets = [m for m in role.members if not m.bot]
+            if not targets:
+                return await interaction.followup.send(f"❌ {role.mention} にメンバーがいません。", ephemeral=True)
+
+            async with self.bot.get_db() as db:
+                async with db.execute(
+                    "SELECT user_id, total_seconds FROM voice_stats WHERE month = ?",
+                    (current_month,)
+                ) as cursor:
+                    rows = await cursor.fetchall()
+                    vc_data = {r['user_id']: r['total_seconds'] for r in rows}
+
+            # 時間順にソート
+            results = sorted(
+                [(m, vc_data.get(m.id, 0)) for m in targets],
+                key=lambda x: x[1],
+                reverse=True
+            )
+
+            embed = discord.Embed(
+                title=f"📊 VC滞在記録一覧 ({current_month})",
+                description=f"ロール: {role.mention} ({len(targets)}名)",
+                color=0x7289da
+            )
+
+            lines = []
+            for i, (m, sec) in enumerate(results):
+                h = sec // 3600
+                mins = (sec % 3600) // 60
+                rank = f"`{i+1}.`"
+                lines.append(f"{rank} **{m.display_name}** ── {h}時間 {mins}分")
+
+            # embedの文字数制限対策で分割
+            chunk = ""
+            for line in lines:
+                if len(chunk) + len(line) > 1000:
+                    embed.add_field(name="\u200b", value=chunk, inline=False)
+                    chunk = ""
+                chunk += line + "\n"
+            if chunk:
+                embed.add_field(name="\u200b", value=chunk, inline=False)
+
+            embed.set_footer(text=f"Requested by {interaction.user.display_name}")
+            return await interaction.followup.send(embed=embed, ephemeral=True)
+
+        # --- ユーザー個別 ---
+        # 他人を見ようとしたら管理者チェック
+        target = member or interaction.user
+        if target.id != interaction.user.id and not is_admin:
+            return await interaction.followup.send("❌ 他のユーザーの記録を見る権限がありません。", ephemeral=True)
 
         async with self.bot.get_db() as db:
-            # WHERE に month = current_month を追加して、今月のデータだけを取得
             async with db.execute(
-                "SELECT total_seconds FROM voice_stats WHERE user_id = ? AND month = ?", 
-                (member.id, current_month)
+                "SELECT total_seconds FROM voice_stats WHERE user_id = ? AND month = ?",
+                (target.id, current_month)
             ) as cursor:
                 row = await cursor.fetchone()
                 total_seconds = row['total_seconds'] if row else 0
 
-        hours = total_seconds // 3600
-        minutes = (total_seconds % 3600) // 60
-        
-        img = Image.new('RGB', (600, 300), color=(44, 47, 51))
-        draw = ImageDraw.Draw(img)
-        
-        try:
-            font_main = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 40)
-            font_sub = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 25)
-        except:
-            font_main = ImageFont.load_default()
-            font_sub = ImageFont.load_default()
+        h = total_seconds // 3600
+        mins = (total_seconds % 3600) // 60
+        sec = total_seconds % 60
 
-        draw.text((40, 40), f"VC STATS: {member.display_name}", fill=(255, 255, 255), font=font_sub)
-        draw.text((40, 100), f"{hours} hours {minutes} mins", fill=(0, 255, 127), font=font_main)
-        draw.text((40, 180), f"Total Seconds: {total_seconds:,}s", fill=(185, 187, 190), font=font_sub)
-        
-        draw.rectangle([40, 240, 560, 245], fill=(114, 137, 218))
-
-        img_byte_arr = io.BytesIO()
-        img.save(img_byte_arr, format='PNG')
-        img_byte_arr.seek(0)
-        
-        file = discord.File(fp=img_byte_arr, filename=f"vc_stats_{member.id}.png")
-        
-        # タイトルにも月を入れておくと親切です
-        embed = discord.Embed(title=f"📊 VC滞在記録照会 ({current_month})", color=0x7289da)
-        embed.set_image(url=f"attachment://vc_stats_{member.id}.png")
+        embed = discord.Embed(
+            title=f"🎙️ VC滞在記録 ({current_month})",
+            color=0x7289da
+        )
+        embed.set_author(name=target.display_name, icon_url=target.display_avatar.url)
+        embed.add_field(name="⏱️ 今月の累計", value=f"**{h}時間 {mins}分 {sec}秒**", inline=False)
+        embed.add_field(name="📐 合計秒数", value=f"{total_seconds:,} 秒", inline=True)
         embed.set_footer(text=f"Requested by {interaction.user.display_name}")
-        
-        await interaction.followup.send(embed=embed, file=file)
 
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 
@@ -1697,7 +1754,7 @@ class Chinchiro(commands.Cog):
         self.last_played = {}
         self.play_counts = {} # セッション中のプレイ回数（湿度管理用）
         self.max_bet = 200000 # 賭け金上限
-        self.tax_rate_pve = 0.05  # PvE 税率 5% (総合RTP 約85%)
+        self.tax_rate_pve = 0.10  # PvE 税率 5% (総合RTP 約85%)
         self.tax_rate_pvp = 0.05  # PvP 場所代 5%
 
     # --- セリフ管理 (完全版：メスガキ＋イースターエッグ＋ガチデレ) ---
@@ -2442,9 +2499,10 @@ class Slot(commands.Cog):
 
     @app_commands.command(name="スロット設定", description="スロットの設定を変更します")
     @app_commands.describe(mode="設定値 (1-6, L)")
-    @app_commands.default_permissions(administrator=True)
+    @commands.is_owner()
     async def config_slot(self, interaction: discord.Interaction, mode: str):
-        if mode not in self.MODES: return await interaction.response.send_message("設定値が無効です。", ephemeral=True)
+        if mode not in self.MODES:
+            return await interaction.response.send_message("設定値が無効です。", ephemeral=True)
         async with self.bot.get_db() as db:
             await db.execute("INSERT OR REPLACE INTO server_config (key, value) VALUES ('slot_mode', ?)", (mode,))
             await db.commit()
@@ -2460,7 +2518,7 @@ class Slot(commands.Cog):
         is_over, remaining = await check_daily_limit(self.bot, interaction.user.id, "slot")
         if is_over:
             return await interaction.response.send_message(
-               "ステラ「今日はもう閉店よ。また明日いらっしゃい♡」\n"
+               "今日はもう閉店よ。また明日いらっしゃい♡\n"
                "（本日の上限10回に達しました）",
                ephemeral=True
            )
@@ -2468,12 +2526,12 @@ class Slot(commands.Cog):
         now = datetime.datetime.now()
         last_time = self.last_played.get(interaction.user.id)
         if last_time and (now - last_time).total_seconds() < 3.5:
-            return await interaction.response.send_message("ステラ「目が回るわ…落ち着きなさい。」", ephemeral=True)
+            return await interaction.response.send_message("目が回るわ…落ち着きなさい。", ephemeral=True)
         self.last_played[interaction.user.id] = now
         
         streak = self.loss_streak.get(interaction.user.id, 0)
         if streak >= 10:
-             await interaction.response.send_message(f"ステラ「…{streak}連敗中よ？ 少し頭を冷やしてきたら？」\n(深呼吸中... ⏳ 5秒)", ephemeral=True)
+             await interaction.response.send_message(f"…{streak}連敗中よ？ 少し頭を冷やしてきたら？\n(深呼吸中... ⏳ 5秒)", ephemeral=True)
              await asyncio.sleep(5)
              self.loss_streak[interaction.user.id] = 5
              return
@@ -3335,71 +3393,125 @@ class ServerStats(commands.Cog):
             traceback.print_exc()
             await interaction.followup.send(f"❌ レポート生成中にエラーが発生しました: {e}")
 
-
+# --- 購入確認View ---
 class ShopPurchaseView(discord.ui.View):
-    def __init__(self, bot, role_id, price, shop_id):
+    def __init__(self, bot, role_id, price, shop_id, item_type, max_per_user):
         super().__init__(timeout=None)
         self.bot = bot
         self.role_id = role_id
         self.price = price
         self.shop_id = shop_id
+        self.item_type = item_type          # 'rental' / 'permanent' / 'ticket'
+        self.max_per_user = max_per_user
 
-    @discord.ui.button(label="このロールを購入する (30日間)", style=discord.ButtonStyle.green, emoji="🛒")
+    def _button_label(self):
+        if self.item_type == "rental":    return "購入する (30日間)"
+        if self.item_type == "permanent": return "購入する (永続)"
+        if self.item_type == "ticket":    return "購入する (引換券)"
+        return "購入する"
+
+    @discord.ui.button(style=discord.ButtonStyle.green, emoji="🛒")
     async def buy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # ボタンラベルを動的に設定できないのでdeferしてから処理
         await interaction.response.defer(ephemeral=True)
-        
         user = interaction.user
-        role = interaction.guild.get_role(self.role_id)
 
-        if not role:
-            return await interaction.followup.send("❌ この商品は現在取り扱われていません。", ephemeral=True)
+        # --- チケット枚数上限チェック ---
+        if self.item_type == "ticket" and self.max_per_user > 0:
+            async with self.bot.get_db() as db:
+                async with db.execute(
+                    "SELECT COUNT(*) as cnt FROM ticket_inventory WHERE user_id = ? AND item_key = ? AND used_at IS NULL",
+                    (user.id, self.role_id)
+                ) as c:
+                    row = await c.fetchone()
+                    if row['cnt'] >= self.max_per_user:
+                        return await interaction.followup.send(
+                            f"❌ このチケットは1人 **{self.max_per_user}枚** までしか持てません。\n（未使用チケットを先に使ってください）",
+                            ephemeral=True
+                        )
 
-        if role in user.roles:
-            return await interaction.followup.send(f"✅ すでに **{role.name}** を持っています。\n期限切れになってから再度購入してください。", ephemeral=True)
+        # --- ロール系: 既に持っているか確認 ---
+        if self.item_type in ("rental", "permanent"):
+            role = interaction.guild.get_role(self.role_id)
+            if not role:
+                return await interaction.followup.send("❌ この商品は現在取り扱われていません。", ephemeral=True)
+            if role in user.roles:
+                return await interaction.followup.send(
+                    f"❌ すでに **{role.name}** を持っています。",
+                    ephemeral=True
+                )
 
+        # --- 残高チェック ---
         async with self.bot.get_db() as db:
-            async with db.execute("SELECT balance FROM accounts WHERE user_id = ?", (user.id,)) as cursor:
-                row = await cursor.fetchone()
+            async with db.execute("SELECT balance FROM accounts WHERE user_id = ?", (user.id,)) as c:
+                row = await c.fetchone()
                 balance = row['balance'] if row else 0
 
-            if balance < self.price:
-                return await interaction.followup.send(f"❌ お金が足りません。\n(価格: {self.price:,} S / 所持金: {balance:,} S)", ephemeral=True)
+        if balance < self.price:
+            return await interaction.followup.send(
+                f"❌ お金が足りません。\n(価格: {self.price:,} S / 所持金: {balance:,} S)",
+                ephemeral=True
+            )
 
-            try:
-                await db.execute("UPDATE accounts SET balance = balance - ? WHERE user_id = ?", (self.price, user.id))
-                
-                month_tag = datetime.datetime.now().strftime("%Y-%m")
+        # --- 購入処理 ---
+        month_tag = datetime.datetime.now().strftime("%Y-%m")
+        try:
+            async with self.bot.get_db() as db:
+                await db.execute(
+                    "UPDATE accounts SET balance = balance - ? WHERE user_id = ?",
+                    (self.price, user.id)
+                )
                 await db.execute(
                     "INSERT INTO transactions (sender_id, receiver_id, amount, type, description, month_tag) VALUES (?, 0, ?, 'SHOP', ?, ?)",
-                    (user.id, self.price, f"購入: {role.name} (Shop: {self.shop_id})", month_tag)
+                    (user.id, self.price, f"購入: Shop({self.shop_id}) item({self.role_id})", month_tag)
                 )
 
-                expiry_date = datetime.datetime.now() + datetime.timedelta(days=30)
-                await db.execute("""
-                    CREATE TABLE IF NOT EXISTS shop_subscriptions (
-                        user_id INTEGER,
-                        role_id INTEGER,
-                        expiry_date TEXT,
-                        PRIMARY KEY (user_id, role_id)
+                if self.item_type == "rental":
+                    expiry_date = datetime.datetime.now() + datetime.timedelta(days=30)
+                    await db.execute(
+                        "INSERT OR REPLACE INTO shop_subscriptions (user_id, role_id, expiry_date) VALUES (?, ?, ?)",
+                        (user.id, self.role_id, expiry_date.strftime("%Y-%m-%d %H:%M:%S"))
                     )
-                """)
-                await db.execute(
-                    "INSERT OR REPLACE INTO shop_subscriptions (user_id, role_id, expiry_date) VALUES (?, ?, ?)",
-                    (user.id, role.id, expiry_date.strftime("%Y-%m-%d %H:%M:%S"))
-                )
-                
+
+                elif self.item_type == "ticket":
+                    # チケットをインベントリに追加
+                    async with db.execute(
+                        "SELECT description FROM shop_items WHERE role_id = ? AND shop_id = ?",
+                        (str(self.role_id), self.shop_id)
+                    ) as c:
+                        item_row = await c.fetchone()
+                        item_name = item_row['description'] if item_row else "チケット"
+                    await db.execute(
+                        "INSERT INTO ticket_inventory (user_id, shop_id, item_key, item_name) VALUES (?, ?, ?, ?)",
+                        (user.id, self.shop_id, str(self.role_id), item_name)
+                    )
+
                 await db.commit()
 
-            except Exception as e:
-                await db.rollback()
-                return await interaction.followup.send(f"❌ エラーが発生しました: {e}", ephemeral=True)
+        except Exception as e:
+            await db.rollback()
+            return await interaction.followup.send(f"❌ エラーが発生しました: {e}", ephemeral=True)
 
-        try:
-            await user.add_roles(role, reason=f"ショップ購入({self.shop_id})")
-            expiry_str = expiry_date.strftime('%Y/%m/%d')
-            await interaction.followup.send(f"🎉 **購入完了！**\n**{role.name}** を購入しました。\n有効期限: **{expiry_str}** まで\n(-{self.price:,} S)", ephemeral=True)
-        except discord.Forbidden:
-            await interaction.followup.send("⚠️ 購入処理は完了しましたが、権限不足でロールを付与できませんでした。", ephemeral=True)
+        # --- ロール付与 ---
+        if self.item_type in ("rental", "permanent"):
+            try:
+                role = interaction.guild.get_role(self.role_id)
+                await user.add_roles(role, reason=f"ショップ購入({self.shop_id})")
+                if self.item_type == "rental":
+                    expiry_str = expiry_date.strftime('%Y/%m/%d')
+                    msg = f"🎉 **購入完了！**\n**{role.name}** を購入しました。\n有効期限: **{expiry_str}** まで\n(-{self.price:,} S)"
+                else:
+                    msg = f"🎉 **購入完了！**\n**{role.name}** を永続付与しました。\n(-{self.price:,} S)"
+                await interaction.followup.send(msg, ephemeral=True)
+            except discord.Forbidden:
+                await interaction.followup.send("⚠️ 購入処理は完了しましたが、権限不足でロールを付与できませんでした。", ephemeral=True)
+
+        elif self.item_type == "ticket":
+            await interaction.followup.send(
+                f"🎟️ **チケット購入完了！**\n**{item_name}** を1枚取得しました。\n"
+                f"管理者が確認し次第、特典が付与されます。\n(-{self.price:,} S)",
+                ephemeral=True
+            )
 
 
 # --- 商品選択メニュー ---
@@ -3407,36 +3519,68 @@ class ShopSelect(discord.ui.Select):
     def __init__(self, bot, items, shop_id):
         self.bot = bot
         self.shop_id = shop_id
+
+        TYPE_EMOJI = {"rental": "⏳", "permanent": "♾️", "ticket": "🎟️"}
+        TYPE_LABEL = {"rental": "30日", "permanent": "永続", "ticket": "引換券"}
+
         options = []
         for item in items:
-            role = item['role_obj']
-            price = item['price']
-            desc = item['desc'] or "説明なし"
+            t = item['item_type']
+            label = f"{item['name']} ({item['price']:,} S)"
+            desc = f"[{TYPE_LABEL.get(t, '?')}] {item['desc'] or '説明なし'}"
             options.append(discord.SelectOption(
-                label=f"{role.name} ({price:,} S)",
-                description=f"[30日] {desc}"[:90], 
-                value=str(role.id),
-                emoji="🏷️"
+                label=label[:100],
+                description=desc[:100],
+                value=str(item['role_id']),
+                emoji=TYPE_EMOJI.get(t, "🏷️")
             ))
-        super().__init__(placeholder="購入したい商品を選択してください...", min_values=1, max_values=1, options=options)
+        super().__init__(
+            placeholder="購入したい商品を選択してください...",
+            min_values=1, max_values=1,
+            options=options
+        )
 
     async def callback(self, interaction: discord.Interaction):
-        role_id = int(self.values[0])
-        price = 0
-        
+        role_id_str = self.values[0]
         async with self.bot.get_db() as db:
-            async with db.execute("SELECT price FROM shop_items WHERE role_id = ? AND shop_id = ?", (str(role_id), self.shop_id)) as cursor:
-                row = await cursor.fetchone()
-                if row: price = row['price']
-        
-        view = ShopPurchaseView(self.bot, role_id, price, self.shop_id)
-        role = interaction.guild.get_role(role_id)
-        
-        embed = discord.Embed(title="🛒 購入確認 (30日レンタル)", description=f"以下のロールを購入しますか？", color=role.color)
-        embed.add_field(name="商品名", value=role.mention, inline=False)
-        embed.add_field(name="価格", value=f"**{price:,} Stell** / 30日間", inline=False)
-        embed.add_field(name="有効期限", value="購入日から30日間（自動解除）", inline=False)
-        
+            async with db.execute(
+                "SELECT * FROM shop_items WHERE role_id = ? AND shop_id = ?",
+                (role_id_str, self.shop_id)
+            ) as c:
+                row = await c.fetchone()
+
+        if not row:
+            return await interaction.response.send_message("❌ 商品情報が取得できませんでした。", ephemeral=True)
+
+        item_type = row['item_type'] or 'rental'
+        price = row['price']
+        max_per_user = row['max_per_user'] or 0
+        role_id = int(role_id_str)
+
+        TYPE_LABEL = {"rental": "30日レンタル", "permanent": "買い切り（永続）", "ticket": "引換券"}
+        TYPE_EMOJI = {"rental": "⏳", "permanent": "♾️", "ticket": "🎟️"}
+
+        if item_type in ("rental", "permanent"):
+            role = interaction.guild.get_role(role_id)
+            color = role.color if role else discord.Color.gold()
+            name_str = role.mention if role else f"ID:{role_id}"
+        else:
+            color = discord.Color.purple()
+            name_str = f"🎟️ {row['description'] or 'チケット'}"
+
+        embed = discord.Embed(
+            title=f"🛒 購入確認 ({TYPE_LABEL.get(item_type, '?')})",
+            color=color
+        )
+        embed.add_field(name="商品", value=name_str, inline=False)
+        embed.add_field(name="価格", value=f"**{price:,} Stell**", inline=True)
+        embed.add_field(name="種別", value=f"{TYPE_EMOJI.get(item_type)} {TYPE_LABEL.get(item_type)}", inline=True)
+        if item_type == "ticket" and max_per_user > 0:
+            embed.add_field(name="所持上限", value=f"{max_per_user}枚まで", inline=True)
+
+        view = ShopPurchaseView(self.bot, role_id, price, self.shop_id, item_type, max_per_user)
+        # ボタンラベルをitem_typeに合わせて変更
+        view.buy_button.label = view._button_label()
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
@@ -3458,78 +3602,73 @@ class ShopSystem(commands.Cog):
     @tasks.loop(hours=1)
     async def check_subscription_expiry(self):
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        expired_rows = []
         async with self.bot.get_db() as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS shop_subscriptions (
-                    user_id INTEGER,
-                    role_id INTEGER,
-                    expiry_date TEXT,
-                    PRIMARY KEY (user_id, role_id)
-                )
-            """)
-            async with db.execute("SELECT user_id, role_id FROM shop_subscriptions WHERE expiry_date < ?", (now_str,)) as cursor:
+            async with db.execute(
+                "SELECT user_id, role_id FROM shop_subscriptions WHERE expiry_date < ?", (now_str,)
+            ) as cursor:
                 expired_rows = await cursor.fetchall()
-        
-        if not expired_rows: return
+
+        if not expired_rows:
+            return
 
         guild = self.bot.guilds[0]
         async with self.bot.get_db() as db:
             for row in expired_rows:
-                user_id = row['user_id']
-                role_id = row['role_id']
-                member = guild.get_member(user_id)
-                role = guild.get_role(role_id)
-                
-                if member and role:
+                member = guild.get_member(row['user_id'])
+                role = guild.get_role(row['role_id'])
+                if member and role and role in member.roles:
                     try:
-                        if role in member.roles:
-                            await member.remove_roles(role, reason="ショップ有効期限切れ")
-                            try:
-                                await member.send(f"⏳ **有効期限切れ**\nロール **{role.name}** の有効期限（30日）が終了しました。")
-                            except: pass
-                    except: pass
-                
-                await db.execute("DELETE FROM shop_subscriptions WHERE user_id = ? AND role_id = ?", (user_id, role_id))
+                        await member.remove_roles(role, reason="ショップ有効期限切れ")
+                        try:
+                            await member.send(f"⏳ **有効期限切れ**\nロール **{role.name}** の有効期限（30日）が終了しました。")
+                        except:
+                            pass
+                    except:
+                        pass
+                await db.execute(
+                    "DELETE FROM shop_subscriptions WHERE user_id = ? AND role_id = ?",
+                    (row['user_id'], row['role_id'])
+                )
             await db.commit()
 
     @check_subscription_expiry.before_loop
     async def before_check(self):
         await self.bot.wait_until_ready()
 
-
     # ▼▼▼ 1. 商品登録 ▼▼▼
-    @app_commands.command(name="ショップ_商品登録", description="ショップにロールを出品します")
-    @app_commands.rename(shop_id="ショップid", role="商品ロール", price="価格", description="説明文")
+    @app_commands.command(name="ショップ_商品登録", description="ショップに商品を登録します")
+    @app_commands.rename(shop_id="ショップid", role="商品ロール", price="価格", description="説明文", item_type="種別", max_per_user="所持上限")
     @app_commands.describe(
-        shop_id="配置するショップのID（例: main, dark など。好きな英数字）",
-        role="販売するロール",
-        price="30日間の価格 (Stell)",
-        description="商品の説明文（パネルに表示されます）"
+        shop_id="配置するショップID（例: main）",
+        role="対象のロール（チケットの場合は識別用に適当なロールを指定）",
+        price="価格 (Stell)",
+        description="商品説明文",
+        item_type="rental=30日 / permanent=永続 / ticket=引換券",
+        max_per_user="チケットの所持上限（0=無制限）"
     )
+    @app_commands.choices(item_type=[
+        app_commands.Choice(name="⏳ 期限付き (30日)", value="rental"),
+        app_commands.Choice(name="♾️ 買い切り (永続)", value="permanent"),
+        app_commands.Choice(name="🎟️ 引換券チケット", value="ticket"),
+    ])
     @has_permission("SUPREME_GOD")
-    async def shop_add(self, interaction: discord.Interaction, shop_id: str, role: discord.Role, price: int, description: str = None):
+    async def shop_add(self, interaction: discord.Interaction, shop_id: str, role: discord.Role, price: int, description: str = None, item_type: str = "rental", max_per_user: int = 0):
         await interaction.response.defer(ephemeral=True)
-        if price < 0: return await interaction.followup.send("価格は0以上にしてください。", ephemeral=True)
+        if price < 0:
+            return await interaction.followup.send("❌ 価格は0以上にしてください。", ephemeral=True)
 
         async with self.bot.get_db() as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS shop_items (
-                    role_id TEXT,
-                    shop_id TEXT,
-                    price INTEGER,
-                    description TEXT,
-                    PRIMARY KEY (role_id, shop_id)
-                )
-            """)
             await db.execute(
-                "INSERT OR REPLACE INTO shop_items (role_id, shop_id, price, description) VALUES (?, ?, ?, ?)",
-                (str(role.id), shop_id, price, description)
+                "INSERT OR REPLACE INTO shop_items (role_id, shop_id, price, description, item_type, max_per_user) VALUES (?, ?, ?, ?, ?, ?)",
+                (str(role.id), shop_id, price, description, item_type, max_per_user)
             )
             await db.commit()
-            
-        await interaction.followup.send(f"✅ ショップ(`{shop_id}`) に **{role.name}** ({price:,} S) を登録しました。", ephemeral=True)
 
+        TYPE_LABEL = {"rental": "30日", "permanent": "永続", "ticket": "引換券"}
+        await interaction.followup.send(
+            f"✅ ショップ(`{shop_id}`) に **{role.name}** ({price:,} S / {TYPE_LABEL.get(item_type)}) を登録しました。",
+            ephemeral=True
+        )
 
     # ▼▼▼ 2. 商品削除 ▼▼▼
     @app_commands.command(name="ショップ_商品削除", description="ショップから商品を取り下げます")
@@ -3539,57 +3678,144 @@ class ShopSystem(commands.Cog):
     async def shop_remove(self, interaction: discord.Interaction, shop_id: str, role: discord.Role):
         await interaction.response.defer(ephemeral=True)
         async with self.bot.get_db() as db:
-            await db.execute("DELETE FROM shop_items WHERE role_id = ? AND shop_id = ?", (str(role.id), shop_id))
+            await db.execute(
+                "DELETE FROM shop_items WHERE role_id = ? AND shop_id = ?",
+                (str(role.id), shop_id)
+            )
             await db.commit()
         await interaction.followup.send(f"🗑️ ショップ(`{shop_id}`) から **{role.name}** を削除しました。", ephemeral=True)
-
 
     # ▼▼▼ 3. パネル設置 ▼▼▼
     @app_commands.command(name="ショップ_パネル設置", description="指定したIDのショップパネルを設置します")
     @app_commands.rename(shop_id="ショップid", title="タイトル", content="本文", image_url="画像url")
-    @app_commands.describe(
-        shop_id="表示するショップID（登録時に決めたもの）", 
-        title="パネルのタイトル", 
-        content="パネルの本文（説明文）", 
-        image_url="画像のURL（あれば）"
-    )
+    @app_commands.describe(shop_id="表示するショップID", title="パネルタイトル", content="パネル本文", image_url="画像URL（任意）")
     @has_permission("SUPREME_GOD")
-    async def shop_panel(self, interaction: discord.Interaction, shop_id: str, title: str = "🛒 ステラショップ", content: str = "欲しいロールを選択してください！", image_url: str = None):
+    async def shop_panel(self, interaction: discord.Interaction, shop_id: str, title: str = "🛒 ステラショップ", content: str = "欲しい商品を選択してください！", image_url: str = None):
         await interaction.response.defer()
-        
-        items = []
+
         async with self.bot.get_db() as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS shop_items (
-                    role_id TEXT,
-                    shop_id TEXT,
-                    price INTEGER,
-                    description TEXT,
-                    PRIMARY KEY (role_id, shop_id)
-                )
-            """)
-            async with db.execute("SELECT * FROM shop_items WHERE shop_id = ?", (shop_id,)) as cursor:
+            async with db.execute(
+                "SELECT * FROM shop_items WHERE shop_id = ?", (shop_id,)
+            ) as cursor:
                 rows = await cursor.fetchall()
-                for row in rows:
-                    role = interaction.guild.get_role(int(row['role_id']))
-                    if role:
-                        items.append({'role_obj': role, 'price': row['price'], 'desc': row['description']})
-        
+
+        if not rows:
+            return await interaction.followup.send(f"❌ ショップID `{shop_id}` に商品がありません。", ephemeral=True)
+
+        items = []
+        TYPE_EMOJI = {"rental": "⏳", "permanent": "♾️", "ticket": "🎟️"}
+        TYPE_LABEL = {"rental": "30日", "permanent": "永続", "ticket": "引換券"}
+        item_list_text = ""
+
+        for row in rows:
+            role = interaction.guild.get_role(int(row['role_id']))
+            if not role:
+                continue
+            t = row['item_type'] or 'rental'
+            items.append({
+                'role_id': int(row['role_id']),
+                'name': role.name,
+                'price': row['price'],
+                'desc': row['description'],
+                'item_type': t,
+                'max_per_user': row['max_per_user'] or 0,
+            })
+            limit_str = f"（上限{row['max_per_user']}枚）" if t == "ticket" and row['max_per_user'] > 0 else ""
+            item_list_text += f"{TYPE_EMOJI.get(t)} **{role.name}**: `{row['price']:,} S` [{TYPE_LABEL.get(t)}]{limit_str}\n"
+
         if not items:
-            return await interaction.followup.send(f"❌ ショップID `{shop_id}` には商品が登録されていません。\n先に `/ショップ_商品登録` で商品を登録してください。", ephemeral=True)
+            return await interaction.followup.send("❌ 有効な商品がありません。", ephemeral=True)
 
         embed = discord.Embed(title=title, description=content, color=discord.Color.gold())
-        if image_url: embed.set_image(url=image_url)
-        
-        embed.add_field(name="💳 システム", value="30日間の買い切り制\n(期限が来ると自動解除)", inline=False)
-        
-        item_list_text = ""
-        for item in items:
-            item_list_text += f"• **{item['role_obj'].mention}**: `{item['price']:,} S`\n"
-        embed.add_field(name="📦 商品ラインナップ", value=item_list_text, inline=False)
+        if image_url:
+            embed.set_image(url=image_url)
+        embed.add_field(name="📦 ラインナップ", value=item_list_text, inline=False)
 
         view = ShopPanelView(self.bot, items, shop_id)
         await interaction.followup.send(embed=embed, view=view)
+
+    # ▼▼▼ 4. チケット確認（管理者向け） ▼▼▼
+    @app_commands.command(name="チケット確認", description="【管理者】未使用チケットの一覧を確認します")
+    @app_commands.describe(shop_id="対象のショップID（省略で全件）")
+    @has_permission("GODDESS")
+    async def ticket_list(self, interaction: discord.Interaction, shop_id: str = None):
+        await interaction.response.defer(ephemeral=True)
+
+        async with self.bot.get_db() as db:
+            if shop_id:
+                async with db.execute(
+                    "SELECT * FROM ticket_inventory WHERE used_at IS NULL AND shop_id = ? ORDER BY purchased_at ASC",
+                    (shop_id,)
+                ) as c:
+                    rows = await c.fetchall()
+            else:
+                async with db.execute(
+                    "SELECT * FROM ticket_inventory WHERE used_at IS NULL ORDER BY purchased_at ASC"
+                ) as c:
+                    rows = await c.fetchall()
+
+        if not rows:
+            return await interaction.followup.send("✅ 未使用チケットはありません。", ephemeral=True)
+
+        embed = discord.Embed(
+            title=f"🎟️ 未使用チケット一覧",
+            description=f"{len(rows)}件",
+            color=discord.Color.purple()
+        )
+
+        for row in rows:
+            purchased = row['purchased_at'][:16] if row['purchased_at'] else "不明"
+            embed.add_field(
+                name=f"ID:{row['id']} | {row['item_name']}",
+                value=f"所持者: <@{row['user_id']}>\n購入日: {purchased}",
+                inline=False
+            )
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ▼▼▼ 5. チケット使用済みにする（管理者向け） ▼▼▼
+    @app_commands.command(name="チケット処理済み", description="【管理者】チケットを処理済みにします")
+    @app_commands.describe(ticket_id="チケットID（/チケット確認 で確認できます）")
+    @has_permission("GODDESS")
+    async def ticket_use(self, interaction: discord.Interaction, ticket_id: int):
+        await interaction.response.defer(ephemeral=True)
+
+        async with self.bot.get_db() as db:
+            async with db.execute(
+                "SELECT * FROM ticket_inventory WHERE id = ?", (ticket_id,)
+            ) as c:
+                row = await c.fetchone()
+
+            if not row:
+                return await interaction.followup.send(f"❌ チケットID `{ticket_id}` が見つかりません。", ephemeral=True)
+            if row['used_at']:
+                return await interaction.followup.send(f"❌ チケットID `{ticket_id}` は既に処理済みです。", ephemeral=True)
+
+            now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            await db.execute(
+                "UPDATE ticket_inventory SET used_at = ?, used_by = ? WHERE id = ?",
+                (now_str, interaction.user.id, ticket_id)
+            )
+            await db.commit()
+
+        # 購入者にDM通知
+        try:
+            user = interaction.client.get_user(row['user_id']) or await interaction.client.fetch_user(row['user_id'])
+            await user.send(
+                f"🎟️ **チケット処理完了**\n"
+                f"**{row['item_name']}** のチケット（ID: {ticket_id}）が処理されました。\n"
+                f"特典付与をお待ちください。"
+            )
+        except:
+            pass
+
+        await interaction.followup.send(
+            f"✅ チケットID `{ticket_id}` を処理済みにしました。\n"
+            f"対象: <@{row['user_id']}> / 内容: **{row['item_name']}**",
+            ephemeral=True
+            )
+
+
 
 # --- 3. 管理者ツール (整理版) ---
 class AdminTools(commands.Cog):
@@ -3698,9 +3924,11 @@ class AdminTools(commands.Cog):
         await self.bot.config.reload()
         await interaction.followup.send(f"✅ 過去 **{days}日間** に取引がないメンバーを、経済統計から除外するように設定しました。", ephemeral=True)
 
-    @app_commands.command(name="ギャンブル制限解除", description="【管理者】指定ユーザーの今日のプレイ制限を解除します")
+
+    @app_commands.command(name="ギャンブル制限解除", description="【管理者】指定ユーザーまたはロールの今日のプレイ制限を解除します")
     @app_commands.describe(
-        target="対象ユーザー",
+        target="対象ユーザー（ロールと同時指定不可）",
+        role="対象ロール（そのロールの全員を解除）",
         game="解除するゲーム"
     )
     @app_commands.choices(game=[
@@ -3709,25 +3937,41 @@ class AdminTools(commands.Cog):
         app_commands.Choice(name="両方", value="all"),
     ])
     @has_permission("ADMIN")
-    async def lift_play_limit(self, interaction: discord.Interaction, target: discord.Member, game: str):
+    async def lift_play_limit(self, interaction: discord.Interaction, game: str, target: Optional[discord.Member] = None, role: Optional[discord.Role] = None):
         await interaction.response.defer(ephemeral=True)
+
+        if not target and not role:
+            return await interaction.followup.send("❌ ユーザーかロールのどちらかを指定してください。", ephemeral=True)
+        if target and role:
+            return await interaction.followup.send("❌ ユーザーとロールは同時に指定できません。", ephemeral=True)
 
         today = datetime.datetime.now().strftime("%Y-%m-%d")
         games = ["chinchiro", "slot"] if game == "all" else [game]
 
+        # 対象メンバーリストを作成
+        if target:
+            members = [target]
+        else:
+            members = [m for m in role.members if not m.bot]
+            if not members:
+                return await interaction.followup.send(f"❌ {role.mention} にメンバーがいません。", ephemeral=True)
+
         async with self.bot.get_db() as db:
-            for g in games:
-                await db.execute("""
-                    INSERT OR IGNORE INTO daily_play_exemptions (user_id, game, date)
-                    VALUES (?, ?, ?)
-                """, (target.id, g, today))
+            for m in members:
+                for g in games:
+                    await db.execute("""
+                        INSERT OR IGNORE INTO daily_play_exemptions (user_id, game, date)
+                        VALUES (?, ?, ?)
+                    """, (m.id, g, today))
             await db.commit()
 
         game_str = "チンチロ・スロット両方" if game == "all" else ("チンチロ" if game == "chinchiro" else "スロット")
-        await interaction.followup.send(
-            f"✅ {target.mention} の **{game_str}** の本日の制限を解除しました。",
-            ephemeral=True
-        )
+        if target:
+            msg = f"✅ {target.mention} の **{game_str}** の本日の制限を解除しました。"
+        else:
+            msg = f"✅ {role.mention} ({len(members)}名) の **{game_str}** の本日の制限を解除しました。"
+
+        await interaction.followup.send(msg, ephemeral=True)
 # --- 追加: 面接用のUIパネル ---
 class InterviewPanelView(discord.ui.View):
     def __init__(self, bot, routes, probation_role_id):
