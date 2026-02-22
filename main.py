@@ -2330,24 +2330,32 @@ class Chinchiro(commands.Cog):
         self.cooldowns[user.id] = datetime.datetime.now()
 
 
+# ================================================================
+#  スロット定数・絵柄
+# ================================================================
 
 SYMBOLS = [
-    ("🍒", 40, 2,  "チェリー"),
-    ("🍋", 30, 3,  "レモン"),
-    ("🔔", 15, 5,  "ベル"),
-    ("⭐",  8, 10, "スター"),
-    ("💎",  4, 20, "ダイヤ"),
-    ("🌸",  2, 40, "フラワー"),
-    ("👑",  1, 80, "クラウン"),
+    # (emoji, weight, mult, label)
+    ("🍒", 40,  4,  "チェリー"),
+    ("🍋", 30,  5,  "レモン"),
+    ("🔔", 15,  8,  "ベル"),
+    ("⭐",  8,  15, "スター"),
+    ("💎",  4,  30, "ダイヤ"),
+    ("🌸",  2,  60, "フラワー"),
+    ("👑",  1,  120,"クラウン"),
 ]
 _POOL = [s for s in SYMBOLS for _ in range(s[1])]
 
-FEVER_STREAK  = 3
-BIGWIN_MULT   = 5
-PARTIAL_RATE  = 0.15
-NORMAL_CD_SEC = 10
+PARTIAL_RATE       = 0.15   # 通常時2枚揃い返却率
+PARTIAL_RATE_FEVER = 0.25   # 確変中2枚揃い返却率
+REVERSE_SLIP_RATE  = 0.08   # 逆滑り確率（リーチ外れそう→当たり）
+FEVER_ENTRY_RATE   = 0.05   # 確変突入率（リーチ外れ時）
+FEVER_SPINS_MIN    = 3      # 確変最小継続回転数
+FEVER_SPINS_MAX    = 5      # 確変最大継続回転数
+BIGWIN_MULT        = 10     # 大当たり判定（ベット×N以上）
+NORMAL_CD_SEC      = 10     # 通常クールダウン秒
 
-LINES = {
+SLOT_LINES = {
     "bigwin": [
         "…っ、な、なんで当たってんの。べ、別にうれしくないけど？アタシが。",
         "…す、すごいじゃん。み、見てないから！べつに！",
@@ -2375,6 +2383,11 @@ LINES = {
         "ふふ〜ん、リーチは飾りなんだよね〜。知らなかった？",
         "あ〜あ、もうちょいだったね〜。次もそうなるよ♪",
     ],
+    "reverse_slip": [
+        "あっ…滑った！？え、当たり！？アタシびっくりしてる！",
+        "えっ滑って揃った！？ずるくない！？おめでとう！",
+        "うそ！？滑って当たるの！？えへへ、すごいじゃん！",
+    ],
     "miss": [
         "はずれ〜！ま、そんなもんだよね♪",
         "ぷ、またはずれ。アンタって本当にざぁこだね〜",
@@ -2389,11 +2402,15 @@ LINES = {
         "連敗記録更新中〜！すごいじゃん、ある意味♪",
         "えっもしかしてわざと負けてる？じゃなきゃおかしいもん♪",
     ],
-    "fever": [
-        "フィーバー中だよ！？えっ待って、えっ、アタシまでドキドキしてきた！",
-        "うわうわ連勝してる！えっこれ夢！？夢じゃない！？どうしよ！",
-        "えっえっ、フィーバーって何！？す、すごいじゃん！えへへ！",
-        "あっやばっ連勝してる！アタシのほうがテンション上がってんだけど！",
+    "fever_win": [
+        "確変中に当たった！？えっえっ、アタシまでドキドキしてきた！",
+        "うわ確変で当たってる！えっこれ夢！？夢じゃない！？どうしよ！",
+        "確変中に当たっちゃった！えへへ、すごいじゃん！",
+    ],
+    "fever_entry": [
+        "プチュン…あっ、確変入ったじゃん！ラッキーじゃん！",
+        "プチュン…え、確変！？これはアタシも予想外だった！",
+        "プチュン…確変突入！次は当たるかもよ〜？",
     ],
     "slip": [
         "あ…ずれた",
@@ -2401,70 +2418,98 @@ LINES = {
         "ふふ、残念でした〜♪",
         "あっぶな〜い",
     ],
+    "rare": [
+        "えっ👑が出た！？アタシ今ちょっとびっくりしてる！",
+        "クラウン！？うわすごっ！えへへ！",
+        "👑じゃん！アタシびっくりしすぎて声出た！",
+    ],
 }
 
-def _line(key: str) -> str:
-    return random.choice(LINES[key])
+def _sl(key: str) -> str:
+    return random.choice(SLOT_LINES[key])
 
 def _spin_reel():
     s = random.choice(_POOL)
-    return (s[0], s[2], s[3])
+    return (s[0], s[2], s[3])  # (emoji, mult, label)
 
-def _spin():
+def _spin_reels():
     return [_spin_reel() for _ in range(3)]
 
-def _calc_payout(reels: list, bet: int):
+def _make_board(left, center, right, spinning=None):
+    """
+    3×3のスロット盤面を生成
+    spinning: "center", "right", None（全部停止）
+    上段・中段（当選ライン）・下段をランダム生成して見た目を作る
+    """
+    sp = "🌀"
+
+    def fake():
+        return random.choice(_POOL)[0]
+
+    l_top, l_mid, l_bot = fake(), left[0],   fake()
+    c_top, c_mid, c_bot = fake(), center[0], fake()
+    r_top, r_mid, r_bot = fake(), right[0],  fake()
+
+    if spinning == "center":
+        c_top = c_mid = c_bot = sp
+    if spinning == "right":
+        r_top = r_mid = r_bot = sp
+    if spinning == "both":
+        c_top = c_mid = c_bot = sp
+        r_top = r_mid = r_bot = sp
+
+    lines = [
+        f"╔═══╦═══╦═══╗",
+        f"║ {l_top} ║ {c_top} ║ {r_top} ║",
+        f"╠═══╬═══╬═══╣",
+        f"║ {l_mid} ║ {c_mid} ║ {r_mid} ║  ← 当選ライン",
+        f"╠═══╬═══╬═══╣",
+        f"║ {l_bot} ║ {c_bot} ║ {r_bot} ║",
+        f"╚═══╩═══╩═══╝",
+    ]
+    return "```\n" + "\n".join(lines) + "\n```"
+
+def _calc_payout(reels: list, bet: int, in_fever: bool):
+    """
+    reels: [(emoji, mult, label), ...]  中段3つ
+    Returns: (payout, role_name, is_reach, is_zorume)
+    """
     e = [r[0] for r in reels]
     m = [r[1] for r in reels]
     l = [r[2] for r in reels]
 
+    partial = PARTIAL_RATE_FEVER if in_fever else PARTIAL_RATE
+
+    # ゾロ目
     if e[0] == e[1] == e[2]:
-        return bet * m[0], f"【{l[0]} ゾロ目！】", False
+        return bet * m[0], f"【{l[0]} ゾロ目！】", False, True
 
-    if   e[0] == e[1]: paired_mult = m[0]
-    elif e[1] == e[2]: paired_mult = m[1]
-    elif e[0] == e[2]: paired_mult = m[0]
-    else:              paired_mult = None
+    # 2枚揃い（リーチ）
+    if e[0] == e[1]:
+        pm, pl = m[0], l[0]
+    elif e[1] == e[2]:
+        pm, pl = m[1], l[1]
+    elif e[0] == e[2]:
+        pm, pl = m[0], l[0]
+    else:
+        pm = None
 
-    if paired_mult is not None:
-        payout = max(1, int(bet * paired_mult * PARTIAL_RATE))
-        return payout, "【2枚揃い（惜しい！）】", True
+    if pm is not None:
+        payout = max(1, int(bet * pm * partial))
+        return payout, f"【{pl} 2枚揃い】", True, False
 
-    return 0, "【ハズレ】", False
+    return 0, "【ハズレ】", False, False
 
-
-class BetSelectView(discord.ui.View):
-    def __init__(self, cog, bets: list):
-        super().__init__(timeout=60)
-        self.cog = cog
-        for bet in bets:
-            btn = discord.ui.Button(
-                label=f"{bet:,} セスタ",
-                style=discord.ButtonStyle.primary,
-                custom_id=f"slot_bet_{bet}"
-            )
-            btn.callback = self._make_cb(bet)
-            self.add_item(btn)
-
-    def _make_cb(self, bet: int):
-        async def cb(interaction: discord.Interaction):
-            for c in self.children:
-                c.disabled = True
-            await interaction.response.edit_message(content="🎰 スピン中…", view=self)
-            await self.cog._do_spin(interaction, bet)
-        return cb
-
-    async def on_timeout(self):
-        for c in self.children:
-            c.disabled = True
-
+# ================================================================
+#  Cog: SlotMachine
+# ================================================================
 
 class SlotMachine(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
 
-    def _cesta(self):
+    def _cesta(self) -> "CestaSystem":
         return self.bot.get_cog("CestaSystem")
 
     async def _cd_check(self, user_id: int):
@@ -2477,20 +2522,17 @@ class SlotMachine(commands.Cog):
                 row = await c.fetchone()
         if not row:
             return True, ""
-
         if row["bigwin_until"]:
             until = datetime.datetime.fromisoformat(str(row["bigwin_until"]))
             if now < until:
                 mins = int((until - now).total_seconds() / 60) + 1
                 return False, f"⏳ 大勝ちクールダウン中… あと **{mins}分** 待ってね。"
-
         if row["last_play"]:
             last    = datetime.datetime.fromisoformat(str(row["last_play"]))
             elapsed = (now - last).total_seconds()
             if elapsed < NORMAL_CD_SEC:
                 secs = int(NORMAL_CD_SEC - elapsed) + 1
                 return False, f"⏳ クールダウン中… あと **{secs}秒**！"
-
         return True, ""
 
     async def _limit_check(self, user_id: int, today: str):
@@ -2502,86 +2544,44 @@ class SlotMachine(commands.Cog):
             ) as c:
                 if await c.fetchone():
                     return True, 0
-
             async with db.execute(
                 "SELECT count FROM daily_play_counts WHERE user_id=? AND game='slot' AND date=?",
                 (user_id, today)
             ) as c:
-                row = await c.fetchone()
-                count = row["count"] if row else 0
-
+                row    = await c.fetchone()
+                count  = row["count"] if row else 0
         return count < limit, count
 
-    @app_commands.command(name="スロット", description="セスタコインでスロットを回します！")
-    async def slot_cmd(self, interaction: discord.Interaction):
-        user_id = interaction.user.id
-        today   = datetime.datetime.now().strftime("%Y-%m-%d")
-        cesta   = self._cesta()
-        bal     = await cesta.get_balance(user_id)
-
-        if bal < 100:
-            return await interaction.response.send_message(
-                "❌ セスタが足りないよ！\n"
-                "`/セスタデイリー` か `/セスタ購入` でチャージしてね。",
-                ephemeral=True
-            )
-
-        limit        = await _cfg(self.bot, "slot_daily_limit")
-        is_ok, count = await self._limit_check(user_id, today)
-        if not is_ok:
-            return await interaction.response.send_message(
-                f"🚫 今日のプレイ上限（**{limit}回**）に達したよ！また明日ね〜♪",
-                ephemeral=True
-            )
-
-        cd_ok, cd_msg = await self._cd_check(user_id)
-        if not cd_ok:
-            return await interaction.response.send_message(cd_msg, ephemeral=True)
-
+    async def _get_fever(self, user_id: int):
+        """確変状態を取得。Returns (in_fever, spins_left)"""
         async with self.bot.get_db() as db:
             async with db.execute(
                 "SELECT win_streak, lose_streak FROM slot_streaks WHERE user_id = ?",
                 (user_id,)
             ) as c:
-                sr = await c.fetchone()
-        win_streak  = sr["win_streak"]  if sr else 0
-        lose_streak = sr["lose_streak"] if sr else 0
-        in_fever    = win_streak >= FEVER_STREAK
+                row = await c.fetchone()
+        if not row:
+            return False, 0, 0, 0
+        return row["win_streak"], row["lose_streak"]
 
-        bet_max = await _cfg(self.bot, "slot_bet_max")
-        bets    = [b for b in [100, 500, 1000] if b <= bet_max and b <= bal]
-        if not bets:
-            bets = [min(100, bal)]
-
-        fever_line = ""
-        if in_fever:
-            fever_line = f"\n🔥 **FEVERモード！** 「{_line('fever')}」\n連勝: {win_streak}回 → 払い戻し +20%"
-        elif lose_streak >= 3:
-            fever_line = f"\n😈 「{_line('lose_streak')}」"
-
-        desc = (
-            f"💜 セスタ残高: **{bal:,} セスタ**\n"
-            f"🎮 本日の残りプレイ: **{limit - count}回**"
-            f"{fever_line}\n\n"
-            f"ベット額を選んでね👇"
-        )
-        await interaction.response.send_message(
-            desc, view=BetSelectView(self, bets), ephemeral=True
-        )
-
-    async def _do_spin(self, interaction: discord.Interaction, bet: int):
+    async def _do_spin(
+        self,
+        interaction: discord.Interaction,
+        bet: int,
+        msg: discord.WebhookMessage
+    ):
         user_id   = interaction.user.id
         now       = datetime.datetime.now()
         today     = now.strftime("%Y-%m-%d")
         cesta     = self._cesta()
         bigwin_cd = await _cfg(self.bot, "slot_bigwin_cd")
 
+        # 残高確認
         bal = await cesta.get_balance(user_id)
         if bal < bet:
-            return await interaction.edit_original_response(
-                content="❌ セスタが不足しています。", view=None
-            )
+            return await msg.edit(content="❌ セスタが不足しています。")
 
+        # 確変・連敗状態取得
         async with self.bot.get_db() as db:
             async with db.execute(
                 "SELECT win_streak, lose_streak FROM slot_streaks WHERE user_id = ?",
@@ -2590,71 +2590,234 @@ class SlotMachine(commands.Cog):
                 sr = await c.fetchone()
         win_streak  = sr["win_streak"]  if sr else 0
         lose_streak = sr["lose_streak"] if sr else 0
-        in_fever    = win_streak >= FEVER_STREAK
 
-        reels                        = _spin()
-        payout, role_name, is_reach  = _calc_payout(reels, bet)
-        is_win                       = payout > bet
-        is_miss                      = payout == 0
+        # 確変状態: win_streakをFEVERスピン残数として使う
+        # win_streak > 0 = 確変中、値が残り回転数
+        in_fever = win_streak > 0
 
-        if in_fever and payout > 0:
-            payout = int(payout * 1.2)
+        # ── リール抽選 ──────────────────────────────────────
+        reels = _spin_reels()
+        payout, role_name, is_reach, is_zorume = _calc_payout(reels, bet, in_fever)
 
+        is_win    = payout > 0
+        is_miss   = payout == 0
         is_bigwin = payout >= bet * BIGWIN_MULT
         rare      = any(r[0] == "👑" for r in reels)
-        e         = [r[0] for r in reels]
 
-        # ── 演出フェーズ1: リール1・2停止 ──
-        await interaction.edit_original_response(
-            content=f"🎰  {e[0]}  |  {e[1]}  |  ❓", view=None
+        # 逆滑り判定（リーチで外れそうなとき）
+        reverse_slip = False
+        if is_reach and not is_zorume:
+            if random.random() < REVERSE_SLIP_RATE:
+                reverse_slip = True
+                # 逆滑りで当たり → 中段を揃える
+                matched_emoji = reels[0][0] if reels[0][0] == reels[1][0] else reels[1][0]
+                matched_sym   = next(s for s in SYMBOLS if s[0] == matched_emoji)
+                reels[2]      = (matched_sym[0], matched_sym[2], matched_sym[3])
+                payout, role_name, is_reach, is_zorume = _calc_payout(reels, bet, in_fever)
+                is_win    = True
+                is_miss   = False
+                is_zorume = True
+
+        # 確変突入判定（リーチ外れ時）
+        fever_entry = False
+        if is_reach and not is_zorume and not reverse_slip and is_miss:
+            if random.random() < FEVER_ENTRY_RATE:
+                fever_entry    = True
+                new_fever_spins = random.randint(FEVER_SPINS_MIN, FEVER_SPINS_MAX)
+            else:
+                new_fever_spins = 0
+        else:
+            new_fever_spins = 0
+
+        # ── フェイクリール生成（上段・下段用）──────────────
+        e = [r[0] for r in reels]
+
+        def fake_col():
+            return random.choice(_POOL)[0]
+
+        tops = [fake_col() for _ in range(3)]
+        bots = [fake_col() for _ in range(3)]
+
+        def board_str(
+            l_mid, c_mid, r_mid,
+            spin_c=False, spin_r=False,
+            slip_r=None
+        ):
+            sp = "🌀"
+            cm = sp if spin_c else c_mid
+            rm = sp if spin_r else (slip_r if slip_r else r_mid)
+            ct = sp if spin_c else tops[1]
+            rt = sp if spin_r else tops[2]
+            cb = sp if spin_c else bots[1]
+            rb = sp if spin_r else bots[2]
+            lines = [
+                "╔═══╦═══╦═══╗",
+                f"║ {tops[0]} ║ {ct} ║ {rt} ║",
+                "╠═══╬═══╬═══╣",
+                f"║ {l_mid} ║ {cm} ║ {rm} ║  ◀ WIN",
+                "╠═══╬═══╬═══╣",
+                f"║ {bots[0]} ║ {cb} ║ {rb} ║",
+                "╚═══╩═══╩═══╝",
+            ]
+            return "```\n" + "\n".join(lines) + "\n```"
+
+        # ── 演出フェーズ1: 全部スピン ────────────────────────
+        fever_banner = "🔥 **確変中！**\n" if in_fever else ""
+        await msg.edit(
+            content=(
+                f"{fever_banner}"
+                f"🎰 スロット スピン中…\n"
+                + board_str(e[0], "🌀", "🌀", spin_c=True, spin_r=True)
+            )
         )
-        await asyncio.sleep(0.9)
+        await asyncio.sleep(0.7)
 
-        # ── 演出フェーズ2: リーチ ──
-        if is_reach:
-            await interaction.edit_original_response(
+        # ── 演出フェーズ2: 左リール停止 ──────────────────────
+        await msg.edit(
+            content=(
+                f"{fever_banner}"
+                f"🎰 左リール停止！\n"
+                + board_str(e[0], "🌀", "🌀", spin_c=True, spin_r=True)
+            )
+        )
+        await asyncio.sleep(0.8)
+
+        # ── 演出フェーズ3: 中リール停止 → リーチ判定 ─────────
+        await msg.edit(
+            content=(
+                f"{fever_banner}"
+                f"🎰 中リール停止！\n"
+                + board_str(e[0], e[1], "🌀", spin_r=True)
+            )
+        )
+        await asyncio.sleep(0.8)
+
+        # リーチ演出
+        if e[0] == e[1] or e[0] == e[2] or e[1] == e[2]:
+            await msg.edit(
                 content=(
-                    f"🎰  {e[0]}  |  {e[1]}  |  ❓\n"
-                    f"⚡ **リーチ！** 「{_line('reach_tease')}」"
+                    f"{fever_banner}"
+                    f"⚡ **リーチ！！** 「{_sl('reach_tease')}」\n"
+                    + board_str(e[0], e[1], "🌀", spin_r=True)
                 )
             )
-            await asyncio.sleep(1.3)
+            await asyncio.sleep(1.2)
 
-            # 滑り演出
-            await interaction.edit_original_response(
+        # ── 演出フェーズ4: 右リール ───────────────────────────
+        if reverse_slip:
+            # 逆滑り演出: 一瞬外れ絵柄を見せてから滑って揃う
+            fake_miss = random.choice([s[0] for s in SYMBOLS if s[0] != e[0]])
+            await msg.edit(
                 content=(
-                    f"🎰  {e[0]}  |  {e[1]}  |  {e[0]} ← ズレてる…\n"
-                    f"「{_line('slip')}」"
+                    f"{fever_banner}"
+                    f"😱 外れ…？\n"
+                    + board_str(e[0], e[1], fake_miss)
+                )
+            )
+            await asyncio.sleep(0.7)
+            await msg.edit(
+                content=(
+                    f"{fever_banner}"
+                    f"✨ **滑った！！当たり！！**「{_sl('reverse_slip')}」\n"
+                    + board_str(e[0], e[1], e[2])
+                )
+            )
+            await asyncio.sleep(1.0)
+
+        elif is_reach and not is_zorume:
+            # 通常滑り: 一瞬当たり絵柄を見せてからズレる
+            await msg.edit(
+                content=(
+                    f"{fever_banner}"
+                    f"🎯 あと一個…！\n"
+                    + board_str(e[0], e[1], e[0])
+                )
+            )
+            await asyncio.sleep(0.7)
+            await msg.edit(
+                content=(
+                    f"{fever_banner}"
+                    f"💨 ズレた…「{_sl('slip')}」\n"
+                    + board_str(e[0], e[1], e[2])
                 )
             )
             await asyncio.sleep(0.8)
 
-        # ── レアフラッシュ ──
+        else:
+            # 通常停止
+            await msg.edit(
+                content=(
+                    f"{fever_banner}"
+                    + board_str(e[0], e[1], e[2])
+                )
+            )
+            await asyncio.sleep(0.6)
+
+        # ── レアフラッシュ ────────────────────────────────────
         if rare:
-            await interaction.edit_original_response(
-                content="✨✨✨ **RARE FLASH!!!** ✨✨✨\n👑 クラウンが出た！！"
+            await msg.edit(
+                content=(
+                    "✨✨✨✨✨✨✨✨✨\n"
+                    "👑  **R A R E  F L A S H ！！**  👑\n"
+                    "✨✨✨✨✨✨✨✨✨\n"
+                    f"「{_sl('rare')}」\n"
+                    + board_str(e[0], e[1], e[2])
+                )
             )
             await asyncio.sleep(1.5)
 
-        # ── DB更新 ──
-        bigwin_until    = None
+        # ── 大当たり演出 ──────────────────────────────────────
         if is_bigwin:
-            bigwin_until = (now + datetime.timedelta(minutes=bigwin_cd)).isoformat()
+            await msg.edit(
+                content=(
+                    "🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟\n"
+                    "💎  **J A C K P O T ！！！**  💎\n"
+                    "🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟\n"
+                    + board_str(e[0], e[1], e[2])
+                )
+            )
+            await asyncio.sleep(1.5)
 
-        new_win_streak  = (win_streak + 1)  if is_win  else 0
-        new_lose_streak = (lose_streak + 1) if is_miss else 0
+        # ── 確変突入演出 ──────────────────────────────────────
+        if fever_entry:
+            await msg.edit(
+                content=(
+                    "🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥\n"
+                    f"⚡  **確変突入！！ {new_fever_spins}回転！**  ⚡\n"
+                    "🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥\n"
+                    f"「{_sl('fever_entry')}」\n"
+                    + board_str(e[0], e[1], e[2])
+                )
+            )
+            await asyncio.sleep(1.5)
+
+        # ── DB更新 ────────────────────────────────────────────
+        bigwin_until = None
+        if is_bigwin:
+            bigwin_until = (
+                now + datetime.timedelta(minutes=bigwin_cd)
+            ).isoformat()
+
+        # 確変スピン残数更新
+        if fever_entry:
+            new_win_streak = new_fever_spins
+        elif in_fever:
+            new_win_streak = max(0, win_streak - 1)
+        else:
+            new_win_streak = 0
+
+        new_lose_streak = (lose_streak + 1) if is_miss and not in_fever else 0
 
         async with self.bot.get_db() as db:
             ok = await cesta.sub_balance(db, user_id, bet)
-            newly = await cesta.record_spend(db, user_id, bet)
-
             if not ok:
-                return await interaction.edit_original_response(
-                    content="❌ セスタ残高が不足しています。", view=None
-                )
+                return await msg.edit(content="❌ セスタ残高が不足しています。")
 
             if payout > 0:
                 await cesta.add_balance(db, user_id, payout)
+
+            # 消費記録（バッジチェック）
+            newly = await cesta.record_spend(db, user_id, bet)
 
             await db.execute("""
                 INSERT INTO slot_cooldowns (user_id, last_play, bigwin_until)
@@ -2683,25 +2846,40 @@ class SlotMachine(commands.Cog):
         new_bal = await cesta.get_balance(user_id)
         net     = payout - bet
 
-        # ── セリフ選択 ──
+        # ── セリフ選択 ────────────────────────────────────────
         if is_bigwin:
-            chara_line = _line("bigwin")
+            chara_line = _sl("bigwin")
+        elif reverse_slip:
+            chara_line = _sl("reverse_slip")
+        elif is_win and in_fever:
+            chara_line = _sl("fever_win")
         elif is_win:
-            chara_line = _line("fever") if in_fever else _line("win")
+            chara_line = _sl("win")
+        elif fever_entry:
+            chara_line = _sl("fever_entry")
         elif is_reach:
-            chara_line = _line("reach_miss")
+            chara_line = _sl("reach_miss")
         elif new_lose_streak >= 3:
-            chara_line = _line("lose_streak")
+            chara_line = _sl("lose_streak")
         else:
-            chara_line = _line("miss")
+            chara_line = _sl("miss")
 
-        # ── Embed ──
+        # ── 結果Embed ─────────────────────────────────────────
         if is_bigwin:
             color  = discord.Color.gold()
-            header = "🏆 **大当たり！！！**"
+            header = "🏆 **JACKPOT！！！**"
+        elif reverse_slip:
+            color  = discord.Color.green()
+            header = "✨ **逆滑り当たり！！**"
+        elif is_win and in_fever:
+            color  = discord.Color.orange()
+            header = "🔥 **確変当たり！**"
         elif is_win:
             color  = discord.Color.green()
             header = "✨ **当たり！**"
+        elif fever_entry:
+            color  = discord.Color.red()
+            header = "⚡ **確変突入！**"
         elif is_reach:
             color  = discord.Color.yellow()
             header = "🎯 **惜しい…！**"
@@ -2710,44 +2888,119 @@ class SlotMachine(commands.Cog):
             header = "💨 **ハズレ…**"
 
         embed = discord.Embed(
-            title="🎰 スロット結果", description=header, color=color
+            title="🎰 スロット結果",
+            description=header,
+            color=color
         )
         embed.add_field(
-            name="リール",
-            value=f"```{e[0]}  |  {e[1]}  |  {e[2]}```",
+            name="盤面",
+            value=board_str(e[0], e[1], e[2]),
             inline=False
         )
-        embed.add_field(name="役",     value=role_name,       inline=True)
-        embed.add_field(name="ベット", value=f"{bet:,} セスタ", inline=True)
+        embed.add_field(name="役",     value=role_name,         inline=True)
+        embed.add_field(name="ベット", value=f"{bet:,} セスタ",  inline=True)
 
         if payout > 0:
             pay_label = f"{payout:,} セスタ"
             if in_fever and is_win:
-                pay_label += "  (+20% FEVER)"
+                pay_label += "  🔥確変ボーナス"
             embed.add_field(name="払い戻し", value=pay_label, inline=True)
 
-        embed.add_field(
-            name="損益",
-            value=f"{'+'if net>=0 else ''}{net:,} セスタ",
-            inline=True
-        )
-        embed.add_field(name="残高", value=f"{new_bal:,} セスタ", inline=True)
+        net_str = f"+{net:,}" if net >= 0 else f"{net:,}"
+        embed.add_field(name="損益",   value=f"{net_str} セスタ",  inline=True)
+        embed.add_field(name="残高",   value=f"{new_bal:,} セスタ", inline=True)
 
+        # 確変残り回転数
         if new_win_streak > 0:
-            if new_win_streak >= FEVER_STREAK:
-                st = f"🔥 FEVERモード！（{new_win_streak}連勝）"
-            else:
-                st = f"🔥 {new_win_streak}連勝！ あと{FEVER_STREAK - new_win_streak}回でFEVER！"
-            embed.add_field(name="連勝", value=st, inline=False)
+            embed.add_field(
+                name="🔥 確変",
+                value=f"残り **{new_win_streak}回転**",
+                inline=True
+            )
 
-        embed.add_field(name="💬 セスタ", value=f"「{chara_line}」", inline=False)
+        embed.add_field(
+            name="💬 セスタ",
+            value=f"「{chara_line}」",
+            inline=False
+        )
+
+        # バッジ取得通知
+        if newly:
+            badge_notif = "\n".join(
+                f"{BADGE_EMOJI.get(b, '🏅')} **{b}** を獲得しました！"
+                for b in newly
+            )
+            embed.add_field(name="🎉 バッジ取得！", value=badge_notif, inline=False)
 
         if is_bigwin:
             embed.set_footer(text=f"⏳ 大勝ちクールダウン: {bigwin_cd}分")
         else:
             embed.set_footer(text=f"⏳ 次のプレイまで {NORMAL_CD_SEC}秒")
 
-        await interaction.edit_original_response(content=None, embed=embed, view=None)
+        await msg.edit(content=None, embed=embed)
+
+# ── /スロット ─────────────────────────────────────────
+    @app_commands.command(name="スロット", description="セスタコインでスロットを回します！")
+    @app_commands.describe(bet="ベット額（セスタ）")
+    @app_commands.choices(bet=[
+        app_commands.Choice(name="10 セスタ",  value=10),
+        app_commands.Choice(name="50 セスタ",  value=50),
+        app_commands.Choice(name="100 セスタ", value=100),
+    ])
+    async def slot_cmd(self, interaction: discord.Interaction, bet: int):
+        user_id = interaction.user.id
+        today   = datetime.datetime.now().strftime("%Y-%m-%d")
+        cesta   = self._cesta()
+        bal     = await cesta.get_balance(user_id)
+
+        if bal < bet:
+            return await interaction.response.send_message(
+                "❌ セスタが足りないよ！\n"
+                "`/セスタデイリー` か `/セスタ購入` でチャージしてね。",
+                ephemeral=True
+            )
+
+        limit        = await _cfg(self.bot, "slot_daily_limit")
+        is_ok, count = await self._limit_check(user_id, today)
+        if not is_ok:
+            return await interaction.response.send_message(
+                f"🚫 今日のプレイ上限（**{limit}回**）に達したよ！また明日ね〜♪",
+                ephemeral=True
+            )
+
+        cd_ok, cd_msg = await self._cd_check(user_id)
+        if not cd_ok:
+            return await interaction.response.send_message(cd_msg, ephemeral=True)
+
+        # 確変・連敗状態取得
+        async with self.bot.get_db() as db:
+            async with db.execute(
+                "SELECT win_streak, lose_streak FROM slot_streaks WHERE user_id = ?",
+                (user_id,)
+            ) as c:
+                sr = await c.fetchone()
+        win_streak  = sr["win_streak"]  if sr else 0
+        lose_streak = sr["lose_streak"] if sr else 0
+        in_fever    = win_streak > 0
+
+        # ステータス表示
+        fever_line = ""
+        if in_fever:
+            fever_line = f"\n🔥 **確変中！** 残り{win_streak}回転"
+        elif lose_streak >= 3:
+            fever_line = f"\n😈 「{_sl('lose_streak')}」"
+
+        await interaction.response.defer(ephemeral=True)
+
+        intro = (
+            f"💜 セスタ残高: **{bal:,} セスタ**\n"
+            f"🎮 本日の残りプレイ: **{limit - count}回**\n"
+            f"🎰 ベット: **{bet:,} セスタ**"
+            f"{fever_line}\n\n"
+            f"🎲 スピン中…"
+        )
+        msg = await interaction.followup.send(intro, ephemeral=True)
+        await self._do_spin(interaction, bet, msg)
 
 # --- 色定義 ---
 def ansi(text, color_code): return f"\x1b[{color_code}m{text}\x1b[0m"
