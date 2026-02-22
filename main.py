@@ -4179,7 +4179,6 @@ class CestaBankBot(commands.Bot):
         
         await self.add_cog(Chinchiro(self))
         await self.add_cog(Jackpot(self))
-        await self.add_cog(Slot(self))
         await self.add_cog(Omikuji(self))
         
         if not self.backup_db_task.is_running():
