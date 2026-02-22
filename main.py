@@ -2542,15 +2542,6 @@ class VoiceHistory(commands.Cog):
         embed.set_footer(text=f"Requested by {interaction.user.display_name}")
 
         await interaction.followup.send(embed=embed, ephemeral=True)
-
-f"{c_frame('┣━━━━━━━━━━━━━━━━━━━━━━━━━━━┫')} \n"
-f"{c_frame('┃')}  {c_text(row_btm.center(19))}  {c_frame('┃')}\n"
-f"{c_frame('┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛')}\n"
-f"{c_frame(status_msg.center(25))}\n"
-f"```"
-        )
-        return screen
-
                 
                 
 # ==========================================
