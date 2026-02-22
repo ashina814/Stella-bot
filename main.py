@@ -2548,7 +2548,7 @@ f"{c_frame('┃')}  {c_text(row_btm.center(19))}  {c_frame('┃')}\n"
 f"{c_frame('┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛')}\n"
 f"{c_frame(status_msg.center(25))}\n"
 f"```"
-        )
+)
         return screen
 
                 
