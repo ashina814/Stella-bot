@@ -1766,7 +1766,7 @@ class Chinchiro(commands.Cog):
         self.last_played = {}
         self.play_counts = {} # セッション中のプレイ回数（湿度管理用）
         self.max_bet = 200000 # 賭け金上限
-        self.tax_rate_pve = 0.10  # PvE 税率 5% (総合RTP 約85%)
+        self.tax_rate_pve = 0.15  # PvE 税率 5% (総合RTP 約85%)
         self.tax_rate_pvp = 0.05  # PvP 場所代 5%
 
     # --- セリフ管理 (完全版：メスガキ＋イースターエッグ＋ガチデレ) ---
@@ -2041,9 +2041,12 @@ class Chinchiro(commands.Cog):
         embed.add_field(name=f"子：{interaction.user.display_name}", value="準備中...", inline=False)
         msg = await interaction.followup.send(embed=embed)
 
-        p_dice, p_score, p_name, p_mult, p_rank, p_super = self.get_roll_result()
-        if p_score == 0: 
-             p_dice, p_score, p_name, p_mult, p_rank, p_super = self.get_roll_result()
+        # セスタのターン：役が出るまで最大3回振る
+        p_score = 0
+        for _ in range(3):
+            p_dice, p_score, p_name, p_mult, p_rank, p_super = self.get_roll_result()
+            if p_score != 0: # 役（目）が出たら終了
+                break
 
         phud = self.render_hud("セスタ", p_dice, p_name, "gold" if p_super else ("red" if p_score <= 0 else "blue"))
         embed.set_field_at(0, name="親：セスタ (確定)", value=phud, inline=False)
@@ -2293,50 +2296,50 @@ class Slot(commands.Cog):
             "MISS":    "💨"
         }
         
-        self.MODES = {
-            "1": { 
+                self.MODES = {
+            "1": { # 期待値: 約88.5% (しっかり回収)
                 "probs": [
-                    ("DIAMOND", 3, 100), ("SEVEN", 50, 20), ("WILD", 100, 10),
-                    ("BELL", 800, 5), ("CHERRY", 1800, 2), ("MISS", 7247, 0)
+                    ("DIAMOND", 5, 100), ("SEVEN", 40, 20), ("WILD", 70, 10),
+                    ("BELL", 500, 5), ("CHERRY", 2500, 2), ("MISS", 6885, 0)
                 ], 
-                "ceiling": 1000, "name": "設定1 (回収)" 
+                "ceiling": 1200, "name": "設定1 (回収)" 
             },
-            "2": { 
+            "2": { # 期待値: 約91.5% (弱回収)
                 "probs": [
-                    ("DIAMOND", 5, 100), ("SEVEN", 60, 20), ("WILD", 120, 10),
-                    ("BELL", 850, 5), ("CHERRY", 1900, 2), ("MISS", 7065, 0)
+                    ("DIAMOND", 6, 100), ("SEVEN", 50, 20), ("WILD", 85, 10),
+                    ("BELL", 600, 5), ("CHERRY", 2350, 2), ("MISS", 6909, 0)
                 ], 
-                "ceiling": 900, "name": "設定2 (弱回収)" 
+                "ceiling": 1000, "name": "設定2 (弱回収)" 
             },
-            "3": { 
+            "3": { # 期待値: 約94.8% (遊びやすい)
                 "probs": [
-                    ("DIAMOND", 8, 100), ("SEVEN", 70, 20), ("WILD", 150, 10),
-                    ("BELL", 900, 5), ("CHERRY", 2000, 2), ("MISS", 6872, 0)
+                    ("DIAMOND", 8, 100), ("SEVEN", 60, 20), ("WILD", 110, 10),
+                    ("BELL", 700, 5), ("CHERRY", 2300, 2), ("MISS", 6822, 0)
                 ], 
-                "ceiling": 800, "name": "設定3 (遊び)" 
+                "ceiling": 850, "name": "設定3 (遊び)" 
             },
-            "4": { 
+            "4": { # 期待値: 約98.2% (トントン)
                 "probs": [
-                    ("DIAMOND", 12, 100), ("SEVEN", 100, 20), ("WILD", 200, 10),
-                    ("BELL", 1000, 5), ("CHERRY", 2100, 2), ("MISS", 6588, 0)
+                    ("DIAMOND", 10, 100), ("SEVEN", 75, 20), ("WILD", 140, 10),
+                    ("BELL", 850, 5), ("CHERRY", 2250, 2), ("MISS", 6675, 0)
                 ], 
-                "ceiling": 600, "name": "設定4 (通常)" 
+                "ceiling": 700, "name": "設定4 (通常)" 
             },
-            "5": { 
+            "5": { # 期待値: 約101.5% (微増インフレ)
                 "probs": [
-                    ("DIAMOND", 20, 100), ("SEVEN", 150, 20), ("WILD", 300, 10),
-                    ("BELL", 1100, 5), ("CHERRY", 2200, 2), ("MISS", 6230, 0)
+                    ("DIAMOND", 12, 100), ("SEVEN", 90, 20), ("WILD", 180, 10),
+                    ("BELL", 1000, 5), ("CHERRY", 2200, 2), ("MISS", 6518, 0)
                 ], 
-                "ceiling": 500, "name": "設定5 (優良)" 
+                "ceiling": 550, "name": "設定5 (優良)" 
             },
-            "6": { 
+            "6": { # 期待値: 約105.8% (夢の設定・制限解除だと少し危険)
                 "probs": [
-                    ("DIAMOND", 40, 100), ("SEVEN", 300, 20), ("WILD", 500, 10),
-                    ("BELL", 1200, 5), ("CHERRY", 2300, 2), ("MISS", 5660, 0)
+                    ("DIAMOND", 15, 100), ("SEVEN", 110, 20), ("WILD", 250, 10),
+                    ("BELL", 1200, 5), ("CHERRY", 2150, 2), ("MISS", 6275, 0)
                 ], 
-                "ceiling": 300, "name": "設定6 (極)" 
+                "ceiling": 400, "name": "設定6 (極)" 
             },
-            "L": { 
+            "L": { # 期待値: 約10.0% (地獄)
                 "probs": [
                     ("DIAMOND", 0, 100), ("SEVEN", 0, 20), ("WILD", 0, 10), 
                     ("BELL", 0, 5), ("CHERRY", 500, 2), ("MISS", 9500, 0)
